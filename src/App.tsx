@@ -13,6 +13,7 @@ import type {
   ExcalidrawImperativeAPI,
   ExcalidrawInitialDataState,
 } from "@excalidraw/excalidraw/types";
+import type { ExcalidrawElementSkeleton } from "@excalidraw/excalidraw/data/transform";
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
 import "@excalidraw/excalidraw/index.css";
 import AiPanel from "./AiPanel";
@@ -34,6 +35,18 @@ type StoredScene = {
   appState: Partial<AppState>;
   files: BinaryFiles;
 };
+
+type HistoryEntry = {
+  id: string;
+  title: string;
+  createdAt: number;
+  elementCount: number;
+  signature: string;
+  scene: StoredScene;
+};
+
+const HISTORY_KEY = "excalidaw.sceneHistory.v1";
+const MAX_HISTORY_ENTRIES = 50;
 
 const emptyScene: ExcalidrawInitialDataState = {
   elements: [],
@@ -106,6 +119,58 @@ function createStoredScene(snapshot: SceneSnapshot): StoredScene {
   };
 }
 
+function createHistoryId() {
+  return `history_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getVisibleElementCount(elements: readonly ExcalidrawElement[]) {
+  return elements.filter((element) => !element.isDeleted).length;
+}
+
+function createSceneSignature(snapshot: SceneSnapshot) {
+  return JSON.stringify({
+    elements: snapshot.elements,
+    files: snapshot.files,
+  });
+}
+
+function loadHistoryEntries(): HistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+
+    if (!raw) {
+      return [];
+    }
+
+    const entries = JSON.parse(raw) as Partial<HistoryEntry>[];
+
+    if (!Array.isArray(entries)) {
+      return [];
+    }
+
+    return entries
+      .filter((entry): entry is HistoryEntry => Boolean(entry.id && entry.scene?.elements))
+      .slice(0, MAX_HISTORY_ENTRIES);
+  } catch {
+    return [];
+  }
+}
+
+function persistHistoryEntries(entries: HistoryEntry[]) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY_ENTRIES)));
+}
+
+function sceneFromHistoryEntry(entry: HistoryEntry): ExcalidrawInitialDataState {
+  return {
+    elements: entry.scene.elements ?? [],
+    appState: {
+      viewBackgroundColor: "#ffffff",
+      ...(entry.scene.appState ?? {}),
+    },
+    files: entry.scene.files ?? {},
+  };
+}
+
 function parseStoredScene(contents: string): ExcalidrawInitialDataState {
   const scene = JSON.parse(contents) as Partial<StoredScene>;
 
@@ -147,6 +212,173 @@ function fitImageForCanvas(width: number, height: number) {
   };
 }
 
+type MutableElementSkeleton = ExcalidrawElementSkeleton & {
+  id?: string;
+  label?: { text?: unknown };
+  start?: { id?: string; text?: unknown; type?: string };
+  end?: { id?: string; text?: unknown; type?: string };
+  text?: unknown;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  points?: readonly [number, number][];
+  startArrowhead?: string | null;
+  endArrowhead?: string | null;
+};
+
+type ElementBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function stringifyText(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return "";
+}
+
+function getElementBounds(element: MutableElementSkeleton): ElementBounds | null {
+  if (
+    typeof element.x !== "number" ||
+    typeof element.y !== "number" ||
+    typeof element.width !== "number" ||
+    typeof element.height !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    x: element.x,
+    y: element.y,
+    width: element.width,
+    height: element.height,
+  };
+}
+
+function getConnectorAnchor(from: ElementBounds, to: ElementBounds) {
+  const fromCenter = {
+    x: from.x + from.width / 2,
+    y: from.y + from.height / 2,
+  };
+  const toCenter = {
+    x: to.x + to.width / 2,
+    y: to.y + to.height / 2,
+  };
+  const dx = toCenter.x - fromCenter.x;
+  const dy = toCenter.y - fromCenter.y;
+
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return {
+      x: dx >= 0 ? from.x + from.width : from.x,
+      y: fromCenter.y,
+    };
+  }
+
+  return {
+    x: fromCenter.x,
+    y: dy >= 0 ? from.y + from.height : from.y,
+  };
+}
+
+function normalizeConnectorGeometry(
+  element: MutableElementSkeleton,
+  elementBoundsById: Map<string, ElementBounds>,
+) {
+  if ((element.type !== "arrow" && element.type !== "line") || !element.start?.id || !element.end?.id) {
+    return element;
+  }
+
+  const startBounds = elementBoundsById.get(element.start.id);
+  const endBounds = elementBoundsById.get(element.end.id);
+
+  if (!startBounds || !endBounds) {
+    return element;
+  }
+
+  const start = getConnectorAnchor(startBounds, endBounds);
+  const end = getConnectorAnchor(endBounds, startBounds);
+  const width = end.x - start.x;
+  const height = end.y - start.y;
+
+  return {
+    ...element,
+    type: "arrow",
+    x: start.x,
+    y: start.y,
+    width,
+    height,
+    points: [
+      [0, 0],
+      [width, height],
+    ],
+    startArrowhead: element.startArrowhead ?? null,
+    endArrowhead: element.type === "line" ? element.endArrowhead ?? null : element.endArrowhead ?? "arrow",
+  } as MutableElementSkeleton;
+}
+
+function normalizeDiagramSkeletons(elements: ExcalidrawElementSkeleton[]) {
+  const normalizedElements = elements.map((element) => {
+    const next: MutableElementSkeleton = { ...(element as MutableElementSkeleton) };
+
+    if (next.type === "text") {
+      next.text = stringifyText(next.text);
+    }
+
+    if (next.label && typeof next.label === "object") {
+      next.label = {
+        ...next.label,
+        text: stringifyText(next.label.text),
+      };
+    }
+
+    (["start", "end"] as const).forEach((endpointKey) => {
+      const endpoint = next[endpointKey];
+
+      if (!endpoint || typeof endpoint !== "object") {
+        return;
+      }
+
+      if (endpoint.type === "text" || "text" in endpoint) {
+        next[endpointKey] = {
+          ...endpoint,
+          text: stringifyText(endpoint.text),
+        };
+      }
+    });
+
+    return next;
+  });
+
+  const elementBoundsById = new Map<string, ElementBounds>();
+
+  normalizedElements.forEach((element) => {
+    if (!element.id || element.type === "arrow" || element.type === "line") {
+      return;
+    }
+
+    const bounds = getElementBounds(element);
+
+    if (bounds) {
+      elementBoundsById.set(element.id, bounds);
+    }
+  });
+
+  return normalizedElements.map((element) => normalizeConnectorGeometry(element, elementBoundsById));
+}
+
 export default function App() {
   const excalidrawAPIRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const snapshotRef = useRef<SceneSnapshot>({
@@ -158,7 +390,9 @@ export default function App() {
   const [initialData, setInitialData] = useState<ExcalidrawInitialDataState>(emptyScene);
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [aiSettings, setAiSettings] = useState<AiSettings>(() => loadAiSettings());
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>(() => loadHistoryEntries());
 
   const persistDirty = useMemo(() => {
     let dirty = false;
@@ -174,6 +408,7 @@ export default function App() {
   }, []);
 
   const loadScene = useCallback((nextScene: ExcalidrawInitialDataState) => {
+    hasMountedSceneRef.current = false;
     snapshotRef.current = {
       elements: nextScene.elements ?? [],
       appState: nextScene.appState ?? {},
@@ -200,10 +435,51 @@ export default function App() {
     persistDirty(false);
   }, [persistDirty]);
 
+  const saveSnapshotToHistory = useCallback((snapshot: SceneSnapshot, title: string) => {
+    const elementCount = getVisibleElementCount(snapshot.elements);
+
+    if (elementCount === 0) {
+      return;
+    }
+
+    const signature = createSceneSignature(snapshot);
+    const entry: HistoryEntry = {
+      id: createHistoryId(),
+      title,
+      createdAt: Date.now(),
+      elementCount,
+      signature,
+      scene: createStoredScene(snapshot),
+    };
+
+    setHistoryEntries((current) => {
+      if (current[0]?.signature === signature) {
+        return current;
+      }
+
+      const nextEntries = [entry, ...current].slice(0, MAX_HISTORY_ENTRIES);
+      persistHistoryEntries(nextEntries);
+      return nextEntries;
+    });
+  }, []);
+
+  const saveCurrentPageToHistory = useCallback((title = "页面") => {
+    saveSnapshotToHistory(snapshotRef.current, title);
+  }, [saveSnapshotToHistory]);
+
   const handleNew = useCallback(() => {
+    saveCurrentPageToHistory("新建前页面");
     void window.excalidaw?.setCleanFile(null);
     loadScene(emptyScene);
-  }, [loadScene]);
+    setIsHistoryOpen(false);
+  }, [loadScene, saveCurrentPageToHistory]);
+
+  const restoreHistory = useCallback((entry: HistoryEntry) => {
+    saveCurrentPageToHistory("切换前页面");
+    void window.excalidaw?.setCleanFile(null);
+    loadScene(sceneFromHistoryEntry(entry));
+    setIsHistoryOpen(false);
+  }, [loadScene, saveCurrentPageToHistory]);
 
   const handleOpen = useCallback(async () => {
     const result = await window.excalidaw?.openScene();
@@ -273,7 +549,7 @@ export default function App() {
       const appState = api.getAppState();
       const offsetX = -appState.scrollX + 80;
       const offsetY = -appState.scrollY + 80;
-      const shiftedSkeletons = result.elements.map((element) => ({
+      const shiftedSkeletons = normalizeDiagramSkeletons(result.elements).map((element) => ({
         ...element,
         x: typeof element.x === "number" ? element.x + offsetX : offsetX,
         y: typeof element.y === "number" ? element.y + offsetY : offsetY,
@@ -294,10 +570,18 @@ export default function App() {
 
       if (elements.length > 0) {
         api.scrollToContent(elements, { fitToContent: true });
+        saveSnapshotToHistory(
+          {
+            elements: [...baseElements, ...elements],
+            appState: sanitizeAppState(api.getAppState()),
+            files: snapshotRef.current.files,
+          },
+          result.title || "原生图表",
+        );
         persistDirty(true);
       }
     },
-    [persistDirty],
+    [persistDirty, saveSnapshotToHistory],
   );
 
   const insertAiImage = useCallback(async (result: AiImageResult) => {
@@ -338,14 +622,27 @@ export default function App() {
       ],
       { regenerateIds: true },
     );
+    const nextElements = [...api.getSceneElementsIncludingDeleted(), imageElement];
+    const nextFiles = {
+      ...snapshotRef.current.files,
+      [fileId]: file,
+    };
 
     api.updateScene({
-      elements: [...api.getSceneElementsIncludingDeleted(), imageElement],
+      elements: nextElements,
       captureUpdate: "IMMEDIATELY",
     });
     api.scrollToContent([imageElement], { fitToContent: true });
+    saveSnapshotToHistory(
+      {
+        elements: nextElements,
+        appState: sanitizeAppState(api.getAppState()),
+        files: nextFiles,
+      },
+      "生成图片",
+    );
     persistDirty(true);
-  }, [persistDirty]);
+  }, [persistDirty, saveSnapshotToHistory]);
 
   useEffect(() => {
     return window.excalidaw?.onMenuCommand(({ command }) => {
@@ -370,13 +667,25 @@ export default function App() {
   return (
     <main className="app-shell">
       <nav className="top-bar">
-        <button
-          className={isAiPanelOpen ? "tool-button active" : "tool-button"}
-          type="button"
-          onClick={() => setIsAiPanelOpen((open) => !open)}
-        >
-          AI 助手
-        </button>
+        <div className="top-bar-left">
+          <button
+            className={isAiPanelOpen ? "tool-button active" : "tool-button"}
+            type="button"
+            onClick={() => setIsAiPanelOpen((open) => !open)}
+          >
+            AI 助手
+          </button>
+          <button className="tool-button" type="button" onClick={handleNew}>
+            新建页面
+          </button>
+          <button
+            className={isHistoryOpen ? "tool-button active" : "tool-button"}
+            type="button"
+            onClick={() => setIsHistoryOpen((open) => !open)}
+          >
+            历史生成
+          </button>
+        </div>
         <button className="settings-button" type="button" onClick={() => setIsSettingsOpen(true)} aria-label="设置">
           设置
         </button>
@@ -445,6 +754,33 @@ export default function App() {
           onSave={updateAiSettings}
           onTestModel={testAiModel}
         />
+      ) : null}
+
+      {isHistoryOpen ? (
+        <div className="modal-backdrop" onMouseDown={() => setIsHistoryOpen(false)}>
+          <section className="history-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>历史生成</h2>
+              <button className="icon-button" type="button" onClick={() => setIsHistoryOpen(false)} aria-label="关闭">
+                关闭
+              </button>
+            </div>
+            <div className="history-list">
+              {historyEntries.length === 0 ? (
+                <p className="empty-settings">还没有历史生成内容。</p>
+              ) : (
+                historyEntries.map((entry) => (
+                  <button className="history-item" type="button" key={entry.id} onClick={() => restoreHistory(entry)}>
+                    <span className="history-title">{entry.title}</span>
+                    <span className="history-meta">
+                      {new Date(entry.createdAt).toLocaleString()} · {entry.elementCount} 个元素
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
+        </div>
       ) : null}
     </main>
   );

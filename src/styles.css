@@ -30,6 +30,12 @@ body {
   background: #ffffff;
 }
 
+.top-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .workspace {
   min-height: 0;
   flex: 1;
@@ -231,6 +237,17 @@ body {
   box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22);
 }
 
+.history-modal {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22);
+}
+
 .modal-header {
   height: 48px;
   display: flex;
@@ -243,6 +260,46 @@ body {
 .modal-header h2 {
   margin: 0;
   font-size: 16px;
+}
+
+.history-list {
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.history-item {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid #d9e2e7;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 10px 12px;
+  color: #0f172a;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.history-item:hover {
+  border-color: #0f766e;
+  background: #f0fdfa;
+}
+
+.history-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.history-meta {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .settings-layout {
