@@ -153,7 +153,7 @@ export default function AiPanel({
     setIsGenerating(true);
     setProgress([]);
     setLastImageResult(null);
-    appendProgress(mode === "image" ? "准备图片生成请求..." : "准备原生图表请求...");
+    appendProgress(mode === "image" ? "准备图片生成请求..." : "准备AI生图表请求...");
 
     try {
       if (mode === "image") {
@@ -174,7 +174,7 @@ export default function AiPanel({
       } else {
         appendProgress("将内置专业图表系统提示词和用户要求发送给语言模型...");
         await onGenerateDiagram({ model: selectedModel, prompt: requirementText, diagramKind }, appendProgress);
-        appendProgress("原生图表已在画布上流式生成完成。");
+        appendProgress("AI生图表已在画布上流式生成完成。");
       }
     } catch (error) {
       appendProgress(error instanceof Error ? error.message : "生成失败。");
@@ -187,10 +187,10 @@ export default function AiPanel({
     <aside className="ai-panel">
       <div className="segmented panel-mode">
         <button className={mode === "image" ? "active" : ""} type="button" onClick={() => setMode("image")}>
-          图生图
+          AI生图
         </button>
         <button className={mode === "diagram" ? "active" : ""} type="button" onClick={() => setMode("diagram")}>
-          原生图表
+          AI生图表
         </button>
       </div>
 

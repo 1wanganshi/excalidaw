@@ -576,7 +576,7 @@ export default function App() {
             appState: sanitizeAppState(api.getAppState()),
             files: snapshotRef.current.files,
           },
-          result.title || "原生图表",
+          result.title || "AI生图表",
         );
         persistDirty(true);
       }
