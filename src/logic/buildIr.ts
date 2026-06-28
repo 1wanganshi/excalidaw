@@ -1,5 +1,5 @@
 import type { LogicExportMode, LogicManuscriptIR } from "./types";
-import { splitSentences } from "./splitSentences";
+import { splitSentences, markParagraphBreaks } from "./splitSentences";
 import {
   assignSentenceRoles,
   buildChains,
@@ -11,6 +11,7 @@ import {
 
 export function buildLogicManuscriptIR(source: string, exportMode: LogicExportMode): LogicManuscriptIR {
   const { sentences, normalized } = splitSentences(source);
+  markParagraphBreaks(sentences, normalized);
   assignSentenceRoles(sentences, normalized);
   const { title, subtitle } = detectTitle(sentences, normalized);
   const edges = recognizeEdges(sentences, normalized);

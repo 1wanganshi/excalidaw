@@ -19,12 +19,14 @@ export type ChainKind =
   | "fan_neg"
   | "fork"
   | "step_list"
+  | "step_block"
   | "lecture_flow"
   | "mindmap_chain";
 
 export type SentenceRole =
   | "title"
   | "subtitle"
+  | "section"
   | "step"
   | "question"
   | "define"
@@ -48,6 +50,7 @@ export type LogicSentence = {
   start: number;
   end: number;
   role?: SentenceRole;
+  paragraphStart?: boolean;
   displayStart?: number;
   displayEnd?: number;
 };

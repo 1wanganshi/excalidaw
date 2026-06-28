@@ -1,32 +1,53 @@
 import type { LogicChain, LogicEdge, LogicEmphasis, LogicSentence, SentenceRole, EdgeRelation } from "./types";
 import { sentenceText } from "./splitSentences";
 
+const STEP_START = /^第[一二三四五六七八九十\d]+步[，,：:\s]/;
+const SECTION_START =
+  /^我们来拆解|^那怎么破局|^试试这样做|^你会发现，|^因为分数的本质|^道德经里|^道德经说|^心理学有一个概念/;
+
 function isStepLine(text: string): boolean {
   const t = text.trim();
-  return /^Step\s*\d/i.test(t) || /^第[一二三四五\d]+步/.test(t) || /^[①②③④⑤⑥⑦⑧⑨]/.test(t);
+  return /^Step\s*\d/i.test(t) || STEP_START.test(t) || /^[①②③④⑤⑥⑦⑧⑨]/.test(t);
+}
+
+function isSectionLine(text: string): boolean {
+  const t = text.trim();
+  if (STEP_START.test(t)) return false;
+  if (isRhetoricalHook(t)) return false;
+  if (t.length <= 18 && /[？?]$/.test(t) && /^(怎么|为什么|那怎么)/.test(t)) return true;
+  return SECTION_START.test(t) || /^我们来拆解/.test(t) || /^那怎么破局/.test(t);
 }
 
 function isContrastPair(fromText: string, toText: string): boolean {
-  if (/不要|不是|别指望|不是靠|别讲|不要去/.test(fromText) && /你就|而是|应该|要/.test(toText)) {
+  if (/不要|不是|别指望|不是靠|别讲|不要去/.test(fromText) && /你就|而是|应该|改成|要/.test(toText)) {
     return true;
   }
   if (fromText.includes("❌") || fromText.includes("✘")) return true;
   return false;
 }
 
+function isRhetoricalHook(text: string): boolean {
+  return /你.*什么|有没有发现|第一反应|越.*越/.test(text);
+}
+
 export function assignSentenceRoles(sentences: LogicSentence[], normalized: string): void {
-  for (const s of sentences) {
+  for (let i = 0; i < sentences.length; i += 1) {
+    const s = sentences[i];
     const text = sentenceText(normalized, s);
     const t = text.trim();
     let role: SentenceRole = "body";
 
     if (isStepLine(text)) role = "step";
+    else if (/^为什么[？?]?$|^具体怎么做[？?]?$|^怎么变[？?]?$|^这时候会发生什么[？?]?$/.test(t)) {
+      role = "question";
+    } else if (isSectionLine(text)) role = "section";
     else if (/什么叫|什么是|那什么叫/.test(text)) role = "question";
     else if (/更关键的是|就两点|关键就|获客的关键/.test(text)) role = "summary";
-    else if (/不是靠|不是靠|别指望/.test(text)) role = "fork_label";
-    else if (/^(不要|别)/.test(t) || /不要去讲|不要讲/.test(text)) role = "contrast_wrong";
-    else if (/^你就|你就给他|你就给/.test(t)) role = "contrast_right";
-    else if (/简单来说|举个例子|譬如|比如说/.test(text)) role = "body";
+    else if (/^不是靠|^别指望/.test(t)) role = "fork_label";
+    else if (/^不要/.test(t) || /不要说/.test(text)) role = "contrast_wrong";
+    else if (/^你就|改成/.test(t)) role = "contrast_right";
+    else if (i < 3 && isRhetoricalHook(text)) role = "question";
+    else if (i >= sentences.length - 2 && /本质|你会发现|真正动起来/.test(text)) role = "summary";
 
     s.role = role;
   }
@@ -34,10 +55,11 @@ export function assignSentenceRoles(sentences: LogicSentence[], normalized: stri
 
 export function extractKeywordRange(sentence: LogicSentence, normalized: string): { start: number; end: number } {
   const text = sentenceText(normalized, sentence);
-  const quote = text.match(/[「『]([^」』]{1,12})[」』]/);
+  const quote = text.match(/[「『""]([^」』""]{1,12})[」』""]/);
   if (quote && quote.index !== undefined) {
     const innerStart = text.indexOf(quote[1], quote.index);
-    return { start: sentence.start + innerStart, end: sentence.start + innerStart + quote[1].length };
+    const offset = sentence.start + (normalized.slice(sentence.start, sentence.end).indexOf(text));
+    return { start: offset + innerStart, end: offset + innerStart + quote[1].length };
   }
 
   const colon = text.search(/[：:]/);
@@ -45,24 +67,31 @@ export function extractKeywordRange(sentence: LogicSentence, normalized: string)
     const after = text.slice(colon + 1).trim();
     const kw = after.slice(0, Math.min(8, after.length));
     if (kw.length > 0) {
+      const offset = sentence.start + (normalized.slice(sentence.start, sentence.end).indexOf(text));
       const idx = text.indexOf(kw, colon + 1);
-      return { start: sentence.start + idx, end: sentence.start + idx + kw.length };
+      return { start: offset + idx, end: offset + idx + kw.length };
     }
   }
 
   const trimmed = text.trim();
   if (trimmed.length <= 12) {
-    return { start: sentence.start, end: sentence.end };
+    const offset = sentence.start + normalized.slice(sentence.start, sentence.end).indexOf(trimmed);
+    return { start: offset, end: offset + trimmed.length };
   }
 
   const kwLen = Math.min(6, trimmed.length);
+  const offset = sentence.start + normalized.slice(sentence.start, sentence.end).indexOf(text);
   const idx = text.indexOf(trimmed.slice(0, kwLen));
-  return { start: sentence.start + idx, end: sentence.start + idx + kwLen };
+  return { start: offset + idx, end: offset + idx + kwLen };
 }
 
 export function recognizeEdges(sentences: LogicSentence[], normalized: string): LogicEdge[] {
   const edges: LogicEdge[] = [];
-  const byId = new Map(sentences.map((s) => [s.id, s]));
+  const stepBlockMembers = new Set<string>();
+
+  for (const chain of buildStepBlocks(sentences, normalized)) {
+    for (const id of chain.sentenceIds) stepBlockMembers.add(id);
+  }
 
   for (let i = 0; i < sentences.length - 1; i += 1) {
     const from = sentences[i];
@@ -70,10 +99,14 @@ export function recognizeEdges(sentences: LogicSentence[], normalized: string): 
     const fromText = sentenceText(normalized, from);
     const toText = sentenceText(normalized, to);
 
-    if (isStepLine(fromText) && isStepLine(toText)) continue;
-    if (/^[①②③④⑤⑥⑦⑧⑨]/.test(fromText.trim()) && /^[①②③④⑤⑥⑦⑧⑨]/.test(toText.trim())) {
-      continue;
+    if (stepBlockMembers.has(from.id) && stepBlockMembers.has(to.id)) {
+      const sameBlock = buildStepBlocks(sentences, normalized).find(
+        (b) => b.sentenceIds.includes(from.id) && b.sentenceIds.includes(to.id),
+      );
+      if (sameBlock && from.id !== sameBlock.sentenceIds[0]) continue;
     }
+
+    if (isStepLine(fromText) && isStepLine(toText)) continue;
     if (isContrastPair(fromText, toText)) continue;
     if (from.role === "contrast_wrong" && to.role === "contrast_right") continue;
 
@@ -82,12 +115,22 @@ export function recognizeEdges(sentences: LogicSentence[], normalized: string): 
       continue;
     }
 
-    if (/更关键的是|重要的是这两个|就两个|两点|分五步|一共分/.test(fromText)) {
-      edges.push({ from: from.id, to: to.id, relation: "fork", arrowKind: "fork" });
+    if (from.role === "question" && to.role === "question") continue;
+    if (from.role === "question" && to.role === "body" && /第一反应|报补习|奇怪的现象/.test(fromText + toText)) {
       continue;
     }
 
-    if (/^(所以|因此|这就说明|于是|核心问题)/.test(toText.trim())) {
+    if (/那怎么破局|怎么破局/.test(fromText) && isStepLine(toText)) {
+      edges.push({ from: from.id, to: to.id, relation: "fork", arrowKind: "down" });
+      continue;
+    }
+
+    if (/我们来拆解|简单来说|更关键的是/.test(fromText)) {
+      edges.push({ from: from.id, to: to.id, relation: "transition", arrowKind: "down" });
+      continue;
+    }
+
+    if (/^(所以|因此|你会发现|因为分数)/.test(toText.trim())) {
       edges.push({ from: from.id, to: to.id, relation: "conclude_from", arrowKind: "down" });
       continue;
     }
@@ -97,37 +140,64 @@ export function recognizeEdges(sentences: LogicSentence[], normalized: string): 
       continue;
     }
 
-    if (/^(然后|接着|于是|下一步|最后|再|但)/.test(toText.trim())) {
+    if (
+      /^(然后|接着|于是|下一步|最后|再|但|这时候|更要命)/.test(toText.trim()) ||
+      /会发生什么/.test(fromText)
+    ) {
       edges.push({ from: from.id, to: to.id, relation: "sequential", arrowKind: "down" });
       continue;
     }
 
-    if (/简单来说|更关键的是|如何做一个|如何做/.test(fromText)) {
-      edges.push({ from: from.id, to: to.id, relation: "transition", arrowKind: "down" });
-      continue;
-    }
-
-    if (/什么叫|什么是/.test(fromText) && !/什么叫|什么是/.test(toText)) {
+    if (/具体怎么做[？?]?$|怎么变[？?]?$|^为什么[？?]?$/.test(fromText.trim())) {
       edges.push({ from: from.id, to: to.id, relation: "sequential", arrowKind: "down" });
       continue;
     }
 
-    if (/缺少了这个/.test(toText)) {
+    if (from.role === "question" && !/^[？?]$/.test(toText.trim())) {
       edges.push({ from: from.id, to: to.id, relation: "sequential", arrowKind: "down" });
       continue;
     }
 
-    if (/→|->|＝|=/.test(fromText) && toText.trim().length <= 16) {
+    if (/→|->|＝|=/.test(fromText) && toText.trim().length <= 20) {
       edges.push({ from: from.id, to: to.id, relation: "chain", arrowKind: "straight" });
     }
   }
 
-  void byId;
   return edges;
 }
 
+const STEP_BLOCK_END = /^试试这样做|^道德经说|^你会发现，|^因为分数的本质/;
+
+export function buildStepBlocks(sentences: LogicSentence[], normalized: string): LogicChain[] {
+  const blocks: LogicChain[] = [];
+  let i = 0;
+  while (i < sentences.length) {
+    const text = sentenceText(normalized, sentences[i]);
+    if (!isStepLine(text)) {
+      i += 1;
+      continue;
+    }
+    const ids = [sentences[i].id];
+    i += 1;
+    while (i < sentences.length) {
+      const nextText = sentenceText(normalized, sentences[i]);
+      if (isStepLine(nextText)) break;
+      if (STEP_BLOCK_END.test(nextText)) break;
+      ids.push(sentences[i].id);
+      i += 1;
+    }
+    blocks.push({
+      id: `chain_stepblock_${blocks.length}`,
+      kind: "step_block",
+      sentenceIds: ids,
+      edges: [],
+    });
+  }
+  return blocks;
+}
+
 export function buildChains(sentences: LogicSentence[], edges: LogicEdge[], normalized: string): LogicChain[] {
-  const chains: LogicChain[] = [];
+  const chains: LogicChain[] = [...buildStepBlocks(sentences, normalized)];
   const edgeBetween = new Map<string, LogicEdge>();
   for (const e of edges) {
     edgeBetween.set(`${e.from}->${e.to}`, e);
@@ -136,7 +206,7 @@ export function buildChains(sentences: LogicSentence[], edges: LogicEdge[], norm
   let stepRun: string[] = [];
   for (const s of sentences) {
     const text = sentenceText(normalized, s);
-    if (isStepLine(text)) {
+    if (/^Step\s*\d/i.test(text.trim()) || /^[①②③④⑤⑥⑦⑧⑨]/.test(text.trim())) {
       stepRun.push(s.id);
     } else if (stepRun.length > 0) {
       chains.push({
@@ -192,21 +262,6 @@ export function buildChains(sentences: LogicSentence[], edges: LogicEdge[], norm
     });
   }
 
-  const forkLabels = sentences.filter((s) => s.role === "fork_label");
-  for (const fl of forkLabels) {
-    const idx = sentences.findIndex((s) => s.id === fl.id);
-    const children = sentences.slice(idx + 1, idx + 7).filter((s) => s.role !== "fork_label");
-    if (children.length >= 2) {
-      chains.push({
-        id: `chain_fan_${chains.length}`,
-        kind: "fan_neg",
-        sentenceIds: [fl.id, ...children.map((c) => c.id)],
-        edges: edges.filter((e) => e.from === fl.id),
-        groupDeny: true,
-      });
-    }
-  }
-
   return chains;
 }
 
@@ -219,8 +274,9 @@ export function detectTitle(
   const first = sentences[0];
   const firstText = sentenceText(normalized, first);
   const looksTitle =
-    firstText.length <= 80 &&
-    (/[？?]/.test(firstText) || /如何|怎么|为什么|什么是/.test(firstText) || /一共分.*步/.test(firstText));
+    !isRhetoricalHook(firstText) &&
+    firstText.length <= 48 &&
+    (/^如何|^怎么做一个|^叙事转换|^获客型/.test(firstText.trim()) || /一共分.*步/.test(firstText));
 
   if (!looksTitle) return {};
 
@@ -228,7 +284,7 @@ export function detectTitle(
   const title = { start: first.start, end: first.end, sentenceId: first.id };
 
   const second = sentences[1];
-  if (second && sentenceText(normalized, second).length <= 60) {
+  if (second && sentenceText(normalized, second).length <= 60 && !second.paragraphStart) {
     second.role = "subtitle";
     return {
       title,
@@ -241,11 +297,17 @@ export function detectTitle(
 
 export function detectEmphasis(sentences: LogicSentence[], normalized: string): LogicEmphasis[] {
   const out: LogicEmphasis[] = [];
+  const keyTerms = ["认知负荷", "反者道之动", "要我学", "我要学", "少则得，多则惑", "有效连接", "安全时间"];
 
   for (const s of sentences) {
+    const raw = normalized.slice(s.start, s.end);
     const text = sentenceText(normalized, s);
+
     if (s.role === "title" || s.role === "summary") {
       out.push({ start: s.start, end: s.end, kind: "size_up", sentenceId: s.id });
+    }
+    if (s.role === "section") {
+      out.push({ start: s.start, end: s.end, kind: "underline", sentenceId: s.id });
     }
     if (s.role === "fork_label" || s.role === "define") {
       out.push({ start: s.start, end: s.end, kind: "frame", sentenceId: s.id });
@@ -257,14 +319,23 @@ export function detectEmphasis(sentences: LogicSentence[], normalized: string): 
       out.push({ start: s.start, end: s.end, kind: "mark_check", sentenceId: s.id });
     }
 
-    const quoteRe = /[「『]([^」』]{1,20})[」』]/g;
+    for (const term of keyTerms) {
+      const idx = text.indexOf(term);
+      if (idx >= 0) {
+        const offset = s.start + raw.indexOf(text) + idx;
+        out.push({ start: offset, end: offset + term.length, kind: "red_text", sentenceId: s.id });
+      }
+    }
+
+    const quoteRe = /[「『""]([^」』""]{1,24})[」』""]/g;
     let m: RegExpExecArray | null;
     while ((m = quoteRe.exec(text)) !== null) {
       const inner = m[1];
       const innerStart = text.indexOf(inner, m.index);
+      const offset = s.start + raw.indexOf(text);
       out.push({
-        start: s.start + innerStart,
-        end: s.start + innerStart + inner.length,
+        start: offset + innerStart,
+        end: offset + innerStart + inner.length,
         kind: "underline",
         sentenceId: s.id,
       });
@@ -272,4 +343,28 @@ export function detectEmphasis(sentences: LogicSentence[], normalized: string): 
   }
 
   return out;
+}
+
+export function parseStepLabel(text: string): { label: string; rest: string } {
+  const m = text.trim().match(/^(第[一二三四五六七八九十\d]+步)[，,：:\s]*([\s\S]*)$/);
+  if (!m) return { label: text.slice(0, 8), rest: text };
+  return { label: m[1], rest: m[2].trim() };
+}
+
+export function parseContrastParts(text: string): { wrong?: string; right?: string } | null {
+  const m = text.match(/不要[^，,。]*[，,]\s*改成[^，,。]*/);
+  if (!m) return null;
+  const wrongM = text.match(/不要[「""]?([^」""，,]+)[」""]?/);
+  const rightM = text.match(/改成[「""]?([^」""，,？?]+)[」""]?/);
+  if (!wrongM || !rightM) return null;
+  return { wrong: wrongM[1], right: rightM[1] };
+}
+
+export function parseFormulaChain(text: string): string[] | null {
+  if (!/→/.test(text)) return null;
+  const parts = text
+    .split(/→/)
+    .map((p) => p.replace(/^[因为：:\s]+/, "").replace(/[。！？；;].*$/, "").trim())
+    .filter((p) => p.length > 0 && p.length <= 12);
+  return parts.length >= 2 ? parts : null;
 }

@@ -7,6 +7,18 @@ export function normalizeSource(source: string): string {
   return source.replace(/\r\n?/g, "\n");
 }
 
+function isInsideQuotes(text: string, index: number): boolean {
+  let asciiQuote = false;
+  let cnQuote = false;
+  for (let i = 0; i < index; i += 1) {
+    const ch = text[i];
+    if (ch === "\"") asciiQuote = !asciiQuote;
+    if (ch === "「" || ch === "『") cnQuote = true;
+    if (ch === "」" || ch === "』") cnQuote = false;
+  }
+  return asciiQuote || cnQuote;
+}
+
 export function splitSentences(source: string): { sentences: LogicSentence[]; normalized: string } {
   const normalized = normalizeSource(source);
   const sentences: LogicSentence[] = [];
@@ -14,12 +26,15 @@ export function splitSentences(source: string): { sentences: LogicSentence[]; no
   let i = 0;
 
   while (i < normalized.length) {
-    const start = i;
+    let start = i;
+    while (start < normalized.length && /\s/.test(normalized[start])) start += 1;
+    if (start >= normalized.length) break;
+
     let end = start;
 
     while (end < normalized.length) {
       const ch = normalized[end];
-      if (SENTENCE_END.test(ch)) {
+      if (SENTENCE_END.test(ch) && !isInsideQuotes(normalized, end)) {
         end += 1;
         const rest = normalized.slice(end);
         const closeMatch = rest.match(CLOSING_AFTER);
@@ -51,5 +66,14 @@ export function splitSentences(source: string): { sentences: LogicSentence[]; no
 }
 
 export function sentenceText(normalized: string, sentence: LogicSentence): string {
-  return normalized.slice(sentence.start, sentence.end);
+  return normalized.slice(sentence.start, sentence.end).trim();
+}
+
+export function markParagraphBreaks(sentences: LogicSentence[], normalized: string): void {
+  for (let i = 1; i < sentences.length; i += 1) {
+    const gap = normalized.slice(sentences[i - 1].end, sentences[i].start);
+    if (/\n\s*\n/.test(gap)) {
+      sentences[i].paragraphStart = true;
+    }
+  }
 }
