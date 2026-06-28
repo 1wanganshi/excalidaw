@@ -21,7 +21,8 @@ function joinRefs(ir: LogicManuscriptIR, refs: string[]): string {
   return refs.map((r) => textOf(ir, r)).join("");
 }
 
-function collectRefs(plan: AiLogicLayoutPlan): string[] {
+/** 收集 pattern 引用的句子 ID（不含 titleRef —— 标题是装饰槽） */
+function collectBodyRefs(plan: AiLogicLayoutPlan): string[] {
   const out: string[] = [];
   const add = (r?: string) => {
     if (r) out.push(r);
@@ -30,7 +31,6 @@ function collectRefs(plan: AiLogicLayoutPlan): string[] {
     if (rs) out.push(...rs);
   };
 
-  add(plan.titleRef);
   for (const sec of plan.sections) {
     for (const p of sec.patterns) {
       switch (p.pattern) {
@@ -163,17 +163,32 @@ export type ResolveResult = {
 
 export function resolveLayoutPlan(ir: LogicManuscriptIR, plan: AiLogicLayoutPlan): ResolveResult {
   const allIds = new Set(ir.sentences.map((s) => s.id));
-  const used = collectRefs(plan);
-  const usedSet = new Set(used);
-  const missing = [...allIds].filter((id) => !usedSet.has(id));
-  const extra = used.filter((id) => !allIds.has(id));
-  const dup = used.filter((id, i) => used.indexOf(id) !== i);
+  const bodyRefs = collectBodyRefs(plan);
+  const bodySet = new Set(bodyRefs);
+  // 标题句是装饰槽：可在 body 里再次出现（不视为重复），但至少要在 title 或 body 出现一次
+  const titleRef = plan.titleRef;
+  const covered = new Set<string>(bodySet);
+  if (titleRef) covered.add(titleRef);
 
-  if (extra.length > 0 || dup.length > 0) {
+  const extra = bodyRefs.filter((id) => !allIds.has(id));
+  // 重复只在 body 内部检测（同一个 sN 在两个 pattern 里才算坏）
+  const dup = bodyRefs.filter((id, i) => bodyRefs.indexOf(id) !== i);
+  const missing = [...allIds].filter((id) => !covered.has(id));
+
+  if (extra.length > 0) {
     return {
       doc: irToPosterV2(ir),
       ok: false,
-      message: `AI 布局无效（多余 ID: ${extra.join(",") || "无"}；重复: ${[...new Set(dup)].join(",") || "无"}），已回退本地布局。`,
+      message: `AI 布局无效（多余 ID: ${extra.join(",")}），已回退本地布局。`,
+      missing,
+      extra,
+    };
+  }
+  if (dup.length > 0) {
+    return {
+      doc: irToPosterV2(ir),
+      ok: false,
+      message: `AI 布局无效（同一句被多个 pattern 引用: ${[...new Set(dup)].join(",")}），已回退本地布局。`,
       missing,
       extra,
     };
