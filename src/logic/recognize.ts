@@ -168,6 +168,72 @@ export function recognizeEdges(sentences: LogicSentence[], normalized: string): 
 
 const STEP_BLOCK_END = /^试试这样做|^道德经说|^你会发现，|^因为分数的本质/;
 
+export function buildHookBlock(sentences: LogicSentence[], normalized: string): LogicChain | null {
+  const ids: string[] = [];
+  for (let i = 0; i < sentences.length; i += 1) {
+    const s = sentences[i];
+    if (s.role === "title" || s.role === "subtitle") continue;
+    const text = sentenceText(normalized, s);
+    if (isSectionLine(text) || isStepLine(text)) break;
+    if (s.paragraphStart && ids.length > 0) break;
+    ids.push(s.id);
+    const next = sentences[i + 1];
+    if (next) {
+      const nextText = sentenceText(normalized, next);
+      if (next.role === "section" || isSectionLine(nextText) || next.paragraphStart) break;
+    }
+  }
+  if (ids.length < 2) return null;
+  const firstBody = sentences.find((s) => s.role !== "title" && s.role !== "subtitle");
+  if (!firstBody || ids[0] !== firstBody.id) return null;
+  return { id: "chain_hook", kind: "hook_block", sentenceIds: ids, edges: [] };
+}
+
+export function parseEnumeratedItem(text: string): { ordinal: string; content: string } | null {
+  const m = text.trim().match(/^(第[一二三四五六七八九十\d]+)[，,：:\s]*([\s\S]+?)[；;]?$/);
+  if (!m) return null;
+  return { ordinal: m[1], content: m[2].replace(/[；;]$/, "").trim() };
+}
+
+export function parseEnumeratedIntro(text: string): { intro: string; firstItem: { ordinal: string; content: string } } | null {
+  const m = text.match(/^([\s\S]*?[：:])\s*(第[一二三四五六七八九十\d]+[，,]\s*[\s\S]+)$/);
+  if (!m) return null;
+  const firstItem = parseEnumeratedItem(m[2]);
+  if (!firstItem) return null;
+  return { intro: m[1], firstItem };
+}
+
+export function buildEnumeratedBlocks(sentences: LogicSentence[], normalized: string): LogicChain[] {
+  const blocks: LogicChain[] = [];
+  let i = 0;
+  while (i < sentences.length) {
+    const text = sentenceText(normalized, sentences[i]);
+    const intro = parseEnumeratedIntro(text);
+    if (intro) {
+      const ids = [sentences[i].id];
+      let j = i + 1;
+      while (j < sentences.length) {
+        const nextText = sentenceText(normalized, sentences[j]);
+        if (!parseEnumeratedItem(nextText)) break;
+        ids.push(sentences[j].id);
+        j += 1;
+      }
+      if (ids.length >= 2) {
+        blocks.push({
+          id: `chain_enum_${blocks.length}`,
+          kind: "enumerated_list",
+          sentenceIds: ids,
+          edges: [],
+        });
+        i = j;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return blocks;
+}
+
 export function buildStepBlocks(sentences: LogicSentence[], normalized: string): LogicChain[] {
   const blocks: LogicChain[] = [];
   let i = 0;
@@ -197,7 +263,11 @@ export function buildStepBlocks(sentences: LogicSentence[], normalized: string):
 }
 
 export function buildChains(sentences: LogicSentence[], edges: LogicEdge[], normalized: string): LogicChain[] {
-  const chains: LogicChain[] = [...buildStepBlocks(sentences, normalized)];
+  const chains: LogicChain[] = [];
+  const hook = buildHookBlock(sentences, normalized);
+  if (hook) chains.push(hook);
+  chains.push(...buildEnumeratedBlocks(sentences, normalized));
+  chains.push(...buildStepBlocks(sentences, normalized));
   const edgeBetween = new Map<string, LogicEdge>();
   for (const e of edges) {
     edgeBetween.set(`${e.from}->${e.to}`, e);
@@ -351,13 +421,19 @@ export function parseStepLabel(text: string): { label: string; rest: string } {
   return { label: m[1], rest: m[2].trim() };
 }
 
-export function parseContrastParts(text: string): { wrong?: string; right?: string } | null {
-  const m = text.match(/不要[^，,。]*[，,]\s*改成[^，,。]*/);
-  if (!m) return null;
-  const wrongM = text.match(/不要[「""]?([^」""，,]+)[」""]?/);
+export function parseContrastParts(text: string): { wrong?: string; right?: string; note?: string } | null {
+  const m = text.match(/不要[说]?[「""]([^」""]+)[」""][，,]\s*改成[「""]([^」""]+)[」""]/);
+  if (m) {
+    const noteM = text.match(/(前者[^，,。]+[，,]\s*后者[^。]+)/);
+    return { wrong: m[1].trim(), right: m[2].trim(), note: noteM?.[1] };
+  }
+  const wrongM = text.match(/不要[「""]?([^」""，,？?]+)[」""]?/);
   const rightM = text.match(/改成[「""]?([^」""，,？?]+)[」""]?/);
-  if (!wrongM || !rightM) return null;
-  return { wrong: wrongM[1], right: rightM[1] };
+  if (wrongM && rightM) {
+    const noteM = text.match(/(前者[^，,。]+[，,]\s*后者[^。]+)/);
+    return { wrong: wrongM[1].trim(), right: rightM[1].trim(), note: noteM?.[1] };
+  }
+  return null;
 }
 
 export function parseFormulaChain(text: string): string[] | null {

@@ -23,5 +23,5 @@ for (const e of ir.edges) {
 }
 console.log("\nChains:");
 for (const c of ir.chains) {
-  console.log(`  ${c.kind}: ${c.sentenceIds.length} sents`);
+  console.log(`  ${c.kind}: ${c.sentenceIds.length} sents [${c.sentenceIds.join(", ")}]`);
 }

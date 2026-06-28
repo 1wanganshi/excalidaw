@@ -20,6 +20,8 @@ export type ChainKind =
   | "fork"
   | "step_list"
   | "step_block"
+  | "hook_block"
+  | "enumerated_list"
   | "lecture_flow"
   | "mindmap_chain";
 
