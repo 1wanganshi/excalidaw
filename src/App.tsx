@@ -980,7 +980,7 @@ export default function App() {
       const offsetX = -appState.scrollX + 80;
       const offsetY = -appState.scrollY + 80;
 
-      onProgress("正在按句子切分原文并识别逻辑链路...");
+      onProgress("正在识别逻辑结构并套用 V2 设计语言（本地，无需大模型）...");
       const { ir, layout } = buildAndRenderLogic(original, request.export, request.theme, {
         x: offsetX,
         y: offsetY,

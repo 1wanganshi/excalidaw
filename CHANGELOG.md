@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.22 - 2026-06-28
+
+- 手稿绘图讲义长图：Logic IR 桥接 `layoutV2` pattern 渲染（scene/contrast/case_box/triplet_list/formula_chain 等），替代纯竖排堆字；消除句间乱箭。
+
 ## 0.2.21 - 2026-06-28
 
 - 手稿绘图：开头引子独立黄框、第一/二/三列举拆行+箭头、对比句 ✘✓ 左右分列。

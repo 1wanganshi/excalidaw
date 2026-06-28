@@ -1,7 +1,7 @@
 import type { PosterTheme } from "../types";
 import { buildLogicManuscriptIR } from "./buildIr";
 import type { LogicExportMode, LogicLayoutResult, LogicManuscriptIR } from "./types";
-import { layoutLecture } from "./layoutLecture";
+import { layoutLectureV2 } from "./layoutLectureV2";
 import { layoutMindmap } from "./layoutMindmap";
 
 type Origin = { x: number; y: number };
@@ -14,7 +14,7 @@ export function renderLogicManuscript(
   if (ir.export === "mindmap") {
     return layoutMindmap(ir, themeId, origin);
   }
-  return layoutLecture(ir, themeId, origin);
+  return layoutLectureV2(ir, themeId, origin);
 }
 
 export function buildAndRenderLogic(

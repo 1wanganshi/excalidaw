@@ -524,7 +524,7 @@ export default function AiPanel({
               内容原文
               <textarea
                 value={logicOriginal}
-                placeholder="粘贴口播稿或讲义原文。系统按句子切分、识别逻辑顺序，有顺序才画箭头；原文 100% 保留。"
+                placeholder="粘贴口播稿或讲义原文。本地识别逻辑结构，套用 V2 白板设计语言（引子场景、列举、对比卡、步骤框、公式链）；原文 100% 保留，无需大模型。"
                 onChange={(event) => setLogicOriginal(event.target.value)}
                 rows={14}
               />

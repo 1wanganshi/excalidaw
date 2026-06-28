@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { buildLogicManuscriptIR } from "../src/logic/buildIr.ts";
+import { debugPosterDoc } from "../src/logic/layoutLectureV2.ts";
 import { sentenceText } from "../src/logic/splitSentences.ts";
 import { validateIrCoverage } from "../src/logic/validate.ts";
 import { renderLogicManuscript } from "../src/logic/render.ts";
@@ -21,7 +22,10 @@ for (const e of ir.edges) {
   const t = sentenceText(ir.normalized, ir.sentences.find((x) => x.id === e.to)!);
   console.log(`  ${e.relation}: ${f.slice(0, 20)} → ${t.slice(0, 20)}`);
 }
-console.log("\nChains:");
-for (const c of ir.chains) {
-  console.log(`  ${c.kind}: ${c.sentenceIds.length} sents [${c.sentenceIds.join(", ")}]`);
+console.log("\nPoster V2 sections:");
+const doc = debugPosterDoc(ir);
+console.log(`  title: ${doc.title}`);
+if (doc.overview) console.log(`  overview: ${doc.overview.join(" | ")}`);
+for (const sec of doc.sections) {
+  console.log(`  [${sec.no ?? "-"}] ${sec.label ?? "引子"} → ${sec.body.map((p) => p.pattern).join(", ")}`);
 }
