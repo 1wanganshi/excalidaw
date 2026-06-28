@@ -101,6 +101,9 @@ declare global {
         streamId: string,
       ): Promise<{ ok: true; total: number } | { ok: false; message: string }>;
       onDiagramStreamV2Event(callback: (event: DiagramStreamV2Event) => void): () => void;
+      generateLogicLayout(
+        request: AiDiagramRequestPayload,
+      ): Promise<Record<string, unknown>>;
     };
   }
 }

@@ -34,6 +34,9 @@ import { renderPoster, renderSingleModule } from "./poster/layout";
 import { renderSectionV2, renderTitleV2, renderOverviewV2 } from "./poster/layoutV2";
 import { POSTER_PADDING } from "./poster/themes";
 import { buildAndRenderLogic } from "./logic/render";
+import { buildLogicManuscriptIR } from "./logic/buildIr";
+import { buildAiLayoutUserPrompt } from "./logic/buildAiLayoutPrompt";
+import { parseAiLayoutPlan, resolveLayoutPlan } from "./logic/resolveLayoutPlan";
 import { validateIrCoverage } from "./logic/validate";
 import type { LogicExportMode } from "./logic/types";
 import {
@@ -963,6 +966,9 @@ export default function App() {
         original: string;
         theme: PosterTheme;
         export: LogicExportMode;
+        model?: AiModelConfig;
+        useAiLayout?: boolean;
+        intent?: string;
       },
       onProgress: (message: string) => void,
     ) => {
@@ -980,20 +986,53 @@ export default function App() {
       const offsetX = -appState.scrollX + 80;
       const offsetY = -appState.scrollY + 80;
 
-      onProgress("正在识别逻辑结构并套用 V2 设计语言（本地，无需大模型）...");
-      const { ir, layout } = buildAndRenderLogic(original, request.export, request.theme, {
-        x: offsetX,
-        y: offsetY,
-      });
+      onProgress("正在本地切句并识别逻辑结构...");
+      const ir = buildLogicManuscriptIR(original, request.export);
 
       const check = validateIrCoverage(ir);
       if (!check.ok) {
         throw new Error(check.message);
       }
-
       onProgress(check.message);
+
+      let posterDoc = undefined;
+      const canUseAi =
+        request.useAiLayout &&
+        request.export === "lecture" &&
+        request.model &&
+        typeof window.excalidaw?.generateLogicLayout === "function";
+
+      if (canUseAi) {
+        try {
+          onProgress("AI 正在分析章节结构与 pattern 布局（不改写原文）...");
+          const userPrompt = buildAiLayoutUserPrompt(ir, request.intent);
+          const raw = await window.excalidaw!.generateLogicLayout({
+            model: request.model!,
+            prompt: userPrompt,
+            diagramKind: "logic-layout",
+          });
+          const plan = parseAiLayoutPlan(raw);
+          if (!plan) {
+            onProgress("AI 返回格式无效，回退本地布局。");
+          } else {
+            const resolved = resolveLayoutPlan(ir, plan);
+            posterDoc = resolved.doc;
+            onProgress(resolved.message);
+          }
+        } catch (err) {
+          onProgress(`AI 布局失败：${(err as Error).message} 已回退本地布局。`);
+        }
+      } else if (request.useAiLayout && request.export === "lecture") {
+        onProgress("未配置语言模型，使用本地规则布局。");
+      }
+
+      const { layout } = buildAndRenderLogic(original, request.export, request.theme, {
+        x: offsetX,
+        y: offsetY,
+      }, posterDoc);
+
       onProgress(
-        `已切分 ${ir.sentences.length} 句，${ir.edges.length} 条逻辑箭头，${ir.chains.length} 条逻辑链。`,
+        `已切分 ${ir.sentences.length} 句，${ir.edges.length} 条逻辑边；${posterDoc ? "AI+本地" : "本地"} V2 渲染。`,
       );
 
       const elements = convertToExcalidrawElements(layout.elements, { regenerateIds: true });

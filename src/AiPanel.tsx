@@ -44,6 +44,9 @@ type LogicGenerateRequest = {
   original: string;
   theme: PosterTheme;
   export: LogicExportMode;
+  model?: AiModelConfig;
+  useAiLayout?: boolean;
+  intent?: string;
 };
 
 type AiPanelProps = {
@@ -118,6 +121,8 @@ export default function AiPanel({
   const [posterIntent, setPosterIntent] = useState("");
   const [logicOriginal, setLogicOriginal] = useState("");
   const [logicExport, setLogicExport] = useState<LogicExportMode>("lecture");
+  const [logicUseAi, setLogicUseAi] = useState(true);
+  const [logicIntent, setLogicIntent] = useState("");
   const [pendingRepair, setPendingRepair] = useState<{
     doc: PosterDocument;
     diff: CharDiff;
@@ -234,6 +239,11 @@ export default function AiPanel({
       return;
     }
 
+    if (mode === "logic" && logicUseAi && logicExport === "lecture" && !selectedModel) {
+      appendProgress("已开启 AI 辅助布局，请先在设置中新增语言大模型；或关闭 AI 辅助。");
+      return;
+    }
+
     setIsGenerating(true);
     setProgress([]);
     setLastImageResult(null);
@@ -276,6 +286,9 @@ export default function AiPanel({
             original: logicOriginal,
             theme: posterTheme,
             export: logicExport,
+            model: selectedModel,
+            useAiLayout: logicUseAi && logicExport === "lecture",
+            intent: logicIntent,
           },
           appendProgress,
         );
@@ -465,7 +478,37 @@ export default function AiPanel({
         </button>
       </div>
 
-      {mode !== "logic" ? (
+      {mode === "logic" ? (
+        <div className="panel-section">
+          <label>
+            语言模型（AI 辅助布局）
+            <select
+              value={selectedLanguageModel?.id ?? ""}
+              onChange={(event) =>
+                updateSettings({ ...settings, selectedLanguageModelId: event.target.value })
+              }
+            >
+              {settings.languageModels.length === 0 ? (
+                <option value="">请先在设置中新增语言模型</option>
+              ) : (
+                settings.languageModels.map((model, index) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name || `语言模型${index + 1}`}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+          <label className="fidelity-toggle-row">
+            <input
+              type="checkbox"
+              checked={logicUseAi}
+              onChange={(event) => setLogicUseAi(event.target.checked)}
+            />
+            <span>AI 辅助布局（选 pattern + 分组，原文仍 100% 本地注入）</span>
+          </label>
+        </div>
+      ) : (
         <div className="panel-section">
           <label>
             {mode === "diagram" ? "语言模型" : "生图模型"}
@@ -489,10 +532,6 @@ export default function AiPanel({
               ))}
             </select>
           </label>
-        </div>
-      ) : (
-        <div className="panel-section">
-          <p className="empty-settings">本地按原文绘制逻辑链路与箭头，无需配置语言模型。</p>
         </div>
       )}
 
@@ -524,9 +563,20 @@ export default function AiPanel({
               内容原文
               <textarea
                 value={logicOriginal}
-                placeholder="粘贴口播稿或讲义原文。本地识别逻辑结构，套用 V2 白板设计语言（引子场景、列举、对比卡、步骤框、公式链）；原文 100% 保留，无需大模型。"
+                placeholder="粘贴口播稿或讲义原文。本地切句保真；开启 AI 辅助时，模型负责选章节与 pattern，文字仍从原文注入。"
                 onChange={(event) => setLogicOriginal(event.target.value)}
-                rows={14}
+                rows={12}
+              />
+            </label>
+          </div>
+          <div className="panel-section">
+            <label>
+              布局意图（可选）
+              <textarea
+                value={logicIntent}
+                placeholder="例如：引子要抓痛点 / 三步方案各用步骤框 / 对比句要醒目 / 公式链横向展示"
+                onChange={(event) => setLogicIntent(event.target.value)}
+                rows={3}
               />
             </label>
           </div>

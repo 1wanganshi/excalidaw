@@ -1,8 +1,7 @@
-import type { PosterTheme } from "../types";
+import type { PosterDocumentV2, PosterTheme } from "../types";
 import { CONTENT_WIDTH, POSTER_PADDING, POSTER_THEMES, POSTER_WIDTH } from "../poster/themes";
 import {
   renderOverviewV2,
-  renderPosterV2,
   renderSectionV2,
   renderTitleV2,
 } from "../poster/layoutV2";
@@ -12,14 +11,13 @@ import type { Skel } from "./draw";
 
 type Origin = { x: number; y: number };
 
-/** 讲义长图：Logic IR → V2 pattern 文档 → 复用 layoutV2 设计语言 */
-export function layoutLectureV2(
-  ir: LogicManuscriptIR,
+/** 从 PosterDocumentV2 渲染讲义长图（本地或 AI 布局计划均可） */
+export function layoutPosterDoc(
+  doc: PosterDocumentV2,
   themeId: PosterTheme,
   origin: Origin,
 ): { elements: Skel[]; phaseBreaks: number[]; height: number } {
   const theme = POSTER_THEMES[themeId];
-  const doc = irToPosterV2(ir);
   const out: Skel[] = [];
   const phaseBreaks: number[] = [];
   let cursor = origin.y + POSTER_PADDING;
@@ -69,6 +67,15 @@ export function layoutLectureV2(
 
   void CONTENT_WIDTH;
   return { elements: out, phaseBreaks, height: totalHeight };
+}
+
+/** 讲义长图：Logic IR → 本地 V2 映射 → 渲染 */
+export function layoutLectureV2(
+  ir: LogicManuscriptIR,
+  themeId: PosterTheme,
+  origin: Origin,
+): { elements: Skel[]; phaseBreaks: number[]; height: number } {
+  return layoutPosterDoc(irToPosterV2(ir), themeId, origin);
 }
 
 /** 调试：预览 V2 文档结构 */

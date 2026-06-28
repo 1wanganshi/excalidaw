@@ -43,4 +43,7 @@ contextBridge.exposeInMainWorld("excalidaw", {
     ipcRenderer.on("ai:diagram-stream-v2:event", listener);
     return () => ipcRenderer.removeListener("ai:diagram-stream-v2:event", listener);
   },
+  generateLogicLayout(request) {
+    return ipcRenderer.invoke("ai:generate-logic-layout", request);
+  },
 });

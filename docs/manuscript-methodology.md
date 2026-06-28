@@ -43,4 +43,19 @@ src/logic/render.ts         — 渲染入口
 
 ## UI
 
-AI 助手 → **手稿绘图** → 选导出形态 → 粘贴原文 → 生成（本地，无需语言模型）。
+AI 助手 → **手稿绘图** → 选导出形态 → 粘贴原文 → 生成。
+
+- **讲义长图**默认开启「AI 辅助布局」：需配置语言模型；模型只选章节与 pattern，不改写原文。
+- 关闭 AI 辅助或 AI 失败时，回退本地规则 + V2 渲染。
+
+## 混合架构（0.2.23+）
+
+```
+原文 → 本地切句(s0,s1…) + 逻辑链提示
+         ↓
+     [可选] AI 布局导演 → { titleRef, overview, sections[].patterns[] }
+         ↓
+     本地 resolve：句子 ID → 原文注入 → PosterDocumentV2
+         ↓
+     layoutV2 渲染（scene / contrast / case_box / …）
+```

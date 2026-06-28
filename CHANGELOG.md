@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.23 - 2026-06-28
+
+- 手稿绘图：新增 **AI 辅助布局**（混合模式）— 本地切句保原文，语言模型只输出句子 ID + pattern 计划，客户端注入文字并用 layoutV2 渲染；失败自动回退规则布局。
+
 ## 0.2.22 - 2026-06-28
 
 - 手稿绘图讲义长图：Logic IR 桥接 `layoutV2` pattern 渲染（scene/contrast/case_box/triplet_list/formula_chain 等），替代纯竖排堆字；消除句间乱箭。
