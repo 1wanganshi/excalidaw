@@ -27,4 +27,20 @@ contextBridge.exposeInMainWorld("excalidaw", {
   generateAiDiagram(request) {
     return ipcRenderer.invoke("ai:generate-diagram", request);
   },
+  generateAiDiagramStream(request, streamId) {
+    return ipcRenderer.invoke("ai:generate-diagram-stream", { request, streamId });
+  },
+  onDiagramStreamEvent(callback) {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("ai:diagram-stream:event", listener);
+    return () => ipcRenderer.removeListener("ai:diagram-stream:event", listener);
+  },
+  generateAiDiagramStreamV2(request, streamId) {
+    return ipcRenderer.invoke("ai:generate-diagram-stream-v2", { request, streamId });
+  },
+  onDiagramStreamV2Event(callback) {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("ai:diagram-stream-v2:event", listener);
+    return () => ipcRenderer.removeListener("ai:diagram-stream-v2:event", listener);
+  },
 });

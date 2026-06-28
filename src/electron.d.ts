@@ -1,6 +1,16 @@
-import type { ExcalidrawElementSkeleton } from "@excalidraw/excalidraw/data/transform";
-
 export type MenuCommand = "new" | "open" | "save" | "save-as";
+
+export type PosterModulePayload =
+  | { kind: "title"; text: string; source?: string }
+  | { kind: "section"; text: string; source?: string }
+  | { kind: "overview"; items: string[]; source?: string }
+  | { kind: "paragraph"; text: string; source: string }
+  | { kind: "highlight"; text: string; source: string }
+  | { kind: "contrast"; wrong: string; right: string; source: string }
+  | { kind: "formula"; items: string[]; source: string }
+  | { kind: "case"; label?: string; text: string; source: string }
+  | { kind: "list"; title?: string; items: string[]; source: string }
+  | { kind: "summary"; text: string; source: string };
 
 export type MenuCommandMessage = {
   command: MenuCommand;
@@ -49,13 +59,26 @@ export type AiDiagramRequestPayload = {
 
 export type AiDiagramResultPayload = {
   title?: string;
-  elements: ExcalidrawElementSkeleton[];
+  modules: PosterModulePayload[];
 };
 
 export type AiTestResultPayload = {
   ok: boolean;
   message: string;
 };
+
+export type DiagramStreamEvent =
+  | { streamId: string; kind: "title"; title: string }
+  | { streamId: string; kind: "module"; module: PosterModulePayload; index: number }
+  | { streamId: string; kind: "done"; total: number }
+  | { streamId: string; kind: "error"; message: string };
+
+export type DiagramStreamV2Event =
+  | { streamId: string; kind: "title"; title: string }
+  | { streamId: string; kind: "overview"; items: string[] }
+  | { streamId: string; kind: "section"; section: unknown; index: number }
+  | { streamId: string; kind: "done"; total: number }
+  | { streamId: string; kind: "error"; message: string };
 
 declare global {
   interface Window {
@@ -68,6 +91,16 @@ declare global {
       testAiModel(model: AiModelConfigPayload): Promise<AiTestResultPayload>;
       generateAiImage(request: AiImageRequestPayload): Promise<AiImageResultPayload>;
       generateAiDiagram(request: AiDiagramRequestPayload): Promise<AiDiagramResultPayload>;
+      generateAiDiagramStream(
+        request: AiDiagramRequestPayload,
+        streamId: string,
+      ): Promise<{ ok: true; total: number } | { ok: false; message: string }>;
+      onDiagramStreamEvent(callback: (event: DiagramStreamEvent) => void): () => void;
+      generateAiDiagramStreamV2(
+        request: AiDiagramRequestPayload,
+        streamId: string,
+      ): Promise<{ ok: true; total: number } | { ok: false; message: string }>;
+      onDiagramStreamV2Event(callback: (event: DiagramStreamV2Event) => void): () => void;
     };
   }
 }

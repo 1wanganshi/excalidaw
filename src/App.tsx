@@ -13,13 +13,38 @@ import type {
   ExcalidrawImperativeAPI,
   ExcalidrawInitialDataState,
 } from "@excalidraw/excalidraw/types";
-import type { ExcalidrawElementSkeleton } from "@excalidraw/excalidraw/data/transform";
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
 import "@excalidraw/excalidraw/index.css";
 import AiPanel from "./AiPanel";
 import SettingsModal from "./SettingsModal";
 import { loadAiSettings, saveAiSettings } from "./storage";
-import type { AiImageRequest, AiImageResult, AiModelConfig, AiSettings } from "./types";
+import type {
+  AiImageRequest,
+  AiImageResult,
+  AiModelConfig,
+  AiSettings,
+  InsertedAiImage,
+  ParagraphRelation,
+  PosterDocument,
+  PosterModule,
+  PosterTheme,
+  SemanticMetadata,
+} from "./types";
+import { renderPoster, renderSingleModule } from "./poster/layout";
+import { renderSectionV2, renderTitleV2, renderOverviewV2 } from "./poster/layoutV2";
+import { POSTER_PADDING } from "./poster/themes";
+import { buildAndRenderLogic } from "./logic/render";
+import { validateIrCoverage } from "./logic/validate";
+import type { LogicExportMode } from "./logic/types";
+import {
+  collectDocumentText,
+  diffSummary,
+  repairDocument,
+  validatePoster,
+  type CharDiff,
+} from "./poster/validate";
+// 0.2.16 起：取消"严格校验 + 自动补齐"，回到 0.2.11 行为 ——
+// 模型给什么就画什么，原文覆盖度只做警告，不再动渲染数据。
 
 type SceneSnapshot = {
   elements: readonly ExcalidrawElement[];
@@ -212,171 +237,164 @@ function fitImageForCanvas(width: number, height: number) {
   };
 }
 
-type MutableElementSkeleton = ExcalidrawElementSkeleton & {
-  id?: string;
-  label?: { text?: unknown };
-  start?: { id?: string; text?: unknown; type?: string };
-  end?: { id?: string; text?: unknown; type?: string };
-  text?: unknown;
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  points?: readonly [number, number][];
-  startArrowhead?: string | null;
-  endArrowhead?: string | null;
-};
+const POSTER_RETRY_LIMIT = 2;
 
-type ElementBounds = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
-function stringifyText(value: unknown) {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (value === null || value === undefined) {
-    return "";
-  }
-
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-
-  return "";
+/**
+ * 轻量的 string-vs-string 字符多重集差异：用在 V2 章节聚合后的整体校验。
+ * 跟 validate.ts 里的 computeCharMultisetDiff 等价但只返回数量，避免 import 形态错配。
+ */
+function computeCharDiffSimple(original: string, generated: string): { ok: boolean; missingCount: number; extraCount: number } {
+  const norm = (s: string) => s.replace(/[\s　​‌‍﻿]+/g, "");
+  const a = norm(original);
+  const b = norm(generated);
+  const count = (s: string) => {
+    const m = new Map<string, number>();
+    for (const ch of s) m.set(ch, (m.get(ch) ?? 0) + 1);
+    return m;
+  };
+  const ca = count(a);
+  const cb = count(b);
+  let miss = 0;
+  let extra = 0;
+  for (const [ch, n] of ca) miss += Math.max(0, n - (cb.get(ch) ?? 0));
+  for (const [ch, n] of cb) extra += Math.max(0, n - (ca.get(ch) ?? 0));
+  return { ok: miss === 0 && extra === 0, missingCount: miss, extraCount: extra };
 }
 
-function getElementBounds(element: MutableElementSkeleton): ElementBounds | null {
-  if (
-    typeof element.x !== "number" ||
-    typeof element.y !== "number" ||
-    typeof element.width !== "number" ||
-    typeof element.height !== "number"
-  ) {
-    return null;
-  }
 
-  return {
-    x: element.x,
-    y: element.y,
-    width: element.width,
-    height: element.height,
-  };
-}
-
-function getConnectorAnchor(from: ElementBounds, to: ElementBounds) {
-  const fromCenter = {
-    x: from.x + from.width / 2,
-    y: from.y + from.height / 2,
-  };
-  const toCenter = {
-    x: to.x + to.width / 2,
-    y: to.y + to.height / 2,
-  };
-  const dx = toCenter.x - fromCenter.x;
-  const dy = toCenter.y - fromCenter.y;
-
-  if (Math.abs(dx) > Math.abs(dy)) {
-    return {
-      x: dx >= 0 ? from.x + from.width : from.x,
-      y: fromCenter.y,
-    };
-  }
-
-  return {
-    x: fromCenter.x,
-    y: dy >= 0 ? from.y + from.height : from.y,
-  };
-}
-
-function normalizeConnectorGeometry(
-  element: MutableElementSkeleton,
-  elementBoundsById: Map<string, ElementBounds>,
+function assembleUserMessage(
+  original: string,
+  intent: string,
+  theme: PosterTheme,
+  retryDiff: CharDiff | null,
 ) {
-  if ((element.type !== "arrow" && element.type !== "line") || !element.start?.id || !element.end?.id) {
-    return element;
+  const sections = [`<theme>${theme}</theme>`, `<content>\n${original}\n</content>`];
+  if (intent.trim()) {
+    sections.push(`<intent>\n${intent.trim()}\n</intent>`);
   }
-
-  const startBounds = elementBoundsById.get(element.start.id);
-  const endBounds = elementBoundsById.get(element.end.id);
-
-  if (!startBounds || !endBounds) {
-    return element;
+  if (retryDiff && !retryDiff.ok) {
+    const missing = retryDiff.missing.join("");
+    const extra = retryDiff.extra.join("");
+    sections.push(
+      `<retry missing=${JSON.stringify(missing)} extra=${JSON.stringify(extra)}>上次输出与原文不一致。请把 missing 字符按原文顺序补回，并删除 extra 字符，然后重新输出。</retry>`,
+    );
   }
-
-  const start = getConnectorAnchor(startBounds, endBounds);
-  const end = getConnectorAnchor(endBounds, startBounds);
-  const width = end.x - start.x;
-  const height = end.y - start.y;
-
-  return {
-    ...element,
-    type: "arrow",
-    x: start.x,
-    y: start.y,
-    width,
-    height,
-    points: [
-      [0, 0],
-      [width, height],
-    ],
-    startArrowhead: element.startArrowhead ?? null,
-    endArrowhead: element.type === "line" ? element.endArrowhead ?? null : element.endArrowhead ?? "arrow",
-  } as MutableElementSkeleton;
+  return sections.join("\n");
 }
 
-function normalizeDiagramSkeletons(elements: ExcalidrawElementSkeleton[]) {
-  const normalizedElements = elements.map((element) => {
-    const next: MutableElementSkeleton = { ...(element as MutableElementSkeleton) };
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const v of value) {
+    if (typeof v === "string") out.push(v);
+  }
+  return out;
+}
 
-    if (next.type === "text") {
-      next.text = stringifyText(next.text);
-    }
+function normalizeModules(raw: unknown): PosterModule[] {
+  if (!Array.isArray(raw)) return [];
+  const allowed = new Set([
+    "title",
+    "section",
+    "overview",
+    "paragraph",
+    "highlight",
+    "contrast",
+    "formula",
+    "case",
+    "list",
+    "summary",
+  ]);
+  const out: PosterModule[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const kind = (item as { kind?: unknown }).kind;
+    if (typeof kind !== "string" || !allowed.has(kind)) continue;
+    const sourceRaw = (item as { source?: unknown }).source;
+    const source = typeof sourceRaw === "string" ? sourceRaw : "";
 
-    if (next.label && typeof next.label === "object") {
-      next.label = {
-        ...next.label,
-        text: stringifyText(next.label.text),
-      };
-    }
+    // 提取语义元信息（由两阶段管道产生，可选）
+    const semantic = extractSemantic(item);
 
-    (["start", "end"] as const).forEach((endpointKey) => {
-      const endpoint = next[endpointKey];
-
-      if (!endpoint || typeof endpoint !== "object") {
-        return;
+    switch (kind) {
+      case "title": {
+        const text = typeof (item as { text?: unknown }).text === "string" ? (item as { text: string }).text : "";
+        out.push({ kind: "title", text, source: "", semantic });
+        break;
       }
-
-      if (endpoint.type === "text" || "text" in endpoint) {
-        next[endpointKey] = {
-          ...endpoint,
-          text: stringifyText(endpoint.text),
-        };
+      case "section": {
+        const text = typeof (item as { text?: unknown }).text === "string" ? (item as { text: string }).text : "";
+        out.push({ kind: "section", text, source: "", semantic });
+        break;
       }
-    });
-
-    return next;
-  });
-
-  const elementBoundsById = new Map<string, ElementBounds>();
-
-  normalizedElements.forEach((element) => {
-    if (!element.id || element.type === "arrow" || element.type === "line") {
-      return;
+      case "overview": {
+        const items = asStringArray((item as { items?: unknown }).items);
+        out.push({ kind: "overview", items, source: "", semantic });
+        break;
+      }
+      case "paragraph": {
+        const text = typeof (item as { text?: unknown }).text === "string" ? (item as { text: string }).text : "";
+        out.push({ kind: "paragraph", text, source: source || text, semantic });
+        break;
+      }
+      case "highlight": {
+        const text = typeof (item as { text?: unknown }).text === "string" ? (item as { text: string }).text : "";
+        out.push({ kind: "highlight", text, source: source || text, semantic });
+        break;
+      }
+      case "contrast": {
+        const wrong = typeof (item as { wrong?: unknown }).wrong === "string" ? (item as { wrong: string }).wrong : "";
+        const right = typeof (item as { right?: unknown }).right === "string" ? (item as { right: string }).right : "";
+        out.push({ kind: "contrast", wrong, right, source: source || wrong + right, semantic });
+        break;
+      }
+      case "formula": {
+        const items = asStringArray((item as { items?: unknown }).items);
+        out.push({ kind: "formula", items, source: source || items.join(""), semantic });
+        break;
+      }
+      case "case": {
+        const label = typeof (item as { label?: unknown }).label === "string" ? (item as { label: string }).label : undefined;
+        const text = typeof (item as { text?: unknown }).text === "string" ? (item as { text: string }).text : "";
+        out.push({ kind: "case", label, text, source: source || text, semantic });
+        break;
+      }
+      case "list": {
+        const title = typeof (item as { title?: unknown }).title === "string" ? (item as { title: string }).title : undefined;
+        const items = asStringArray((item as { items?: unknown }).items);
+        out.push({ kind: "list", title, items, source: source || items.join(""), semantic });
+        break;
+      }
+      case "summary": {
+        const text = typeof (item as { text?: unknown }).text === "string" ? (item as { text: string }).text : "";
+        out.push({ kind: "summary", text, source: source || text, semantic });
+        break;
+      }
     }
+  }
+  return out;
+}
 
-    const bounds = getElementBounds(element);
-
-    if (bounds) {
-      elementBoundsById.set(element.id, bounds);
-    }
-  });
-
-  return normalizedElements.map((element) => normalizeConnectorGeometry(element, elementBoundsById));
+/** 从 LLM 返回的原始模块数据中提取语义元信息 */
+function extractSemantic(item: unknown): SemanticMetadata | undefined {
+  const raw = (item as { semantic?: unknown }).semantic;
+  if (!raw || typeof raw !== "object") return undefined;
+  const sem = raw as Record<string, unknown>;
+  const importance = sem.importance;
+  if (importance !== 1 && importance !== 2 && importance !== 3) return undefined;
+  const relationToPrev = sem.relationToPrev;
+  const relatedRaw = sem.relatedConcepts;
+  const relatedConcepts = Array.isArray(relatedRaw)
+    ? relatedRaw.filter((c): c is string => typeof c === "string")
+    : undefined;
+  const validRelations = new Set(["causes", "contrasts", "elaborates", "exampleOf", "sequential", "none"]);
+  return {
+    importance: importance as 1 | 2 | 3,
+    relationToPrev: typeof relationToPrev === "string" && validRelations.has(relationToPrev)
+      ? (relationToPrev as ParagraphRelation)
+      : undefined,
+    relatedConcepts: relatedConcepts && relatedConcepts.length > 0 ? relatedConcepts : undefined,
+  };
 }
 
 export default function App() {
@@ -527,45 +545,48 @@ export default function App() {
     [],
   );
 
-  const generateAiDiagram = useCallback(
+  const renderPosterDocument = useCallback(
     async (
-      request: { model: AiModelConfig; prompt: string; diagramKind: string },
+      doc: PosterDocument,
+      theme: PosterTheme,
       onProgress: (message: string) => void,
     ) => {
       const api = excalidrawAPIRef.current;
-
       if (!api) {
         throw new Error("画布还没有准备好。");
-      }
-
-      onProgress("已发送内置专业图表系统提示词和用户要求到语言模型...");
-      const result = await window.excalidaw?.generateAiDiagram(request);
-      onProgress("正在解析 Excalidraw 元素...");
-
-      if (!result) {
-        throw new Error("没有收到图表数据。");
       }
 
       const appState = api.getAppState();
       const offsetX = -appState.scrollX + 80;
       const offsetY = -appState.scrollY + 80;
-      const shiftedSkeletons = normalizeDiagramSkeletons(result.elements).map((element) => ({
-        ...element,
-        x: typeof element.x === "number" ? element.x + offsetX : offsetX,
-        y: typeof element.y === "number" ? element.y + offsetY : offsetY,
-      }));
-      const elements = convertToExcalidrawElements(shiftedSkeletons, { regenerateIds: true });
+      const layout = renderPoster(doc, theme, { x: offsetX, y: offsetY });
+      const skeletons = layout.elements;
+      const elements = convertToExcalidrawElements(skeletons, { regenerateIds: true });
       const baseElements = api.getSceneElementsIncludingDeleted();
 
-      onProgress(`准备在画布上流式生成 ${elements.length} 个元素...`);
+      onProgress(`准备在画布上一句一句生成 ${elements.length} 个元素...`);
 
+      // Phase-based pacing: within a phase elements appear fast (装饰先出, 文字最后);
+      // between phases pause longer so the user feels each sentence "appear".
+      const phaseBreaks = layout.phaseBreaks.length > 0 ? layout.phaseBreaks : [elements.length];
+      const breakSet = new Set(phaseBreaks);
+      const totalPhases = phaseBreaks.length;
+      const intraDelay = elements.length > 200 ? 24 : 40;
+      const phaseDelay = totalPhases > 30 ? 220 : totalPhases > 16 ? 320 : 460;
+
+      let currentPhase = 0;
       for (let index = 0; index < elements.length; index += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, index === 0 ? 80 : 180));
+        const isPhaseBoundary = breakSet.has(index);
+        const delay = index === 0 ? 200 : isPhaseBoundary ? phaseDelay : intraDelay;
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
         api.updateScene({
           elements: [...baseElements, ...elements.slice(0, index + 1)],
           captureUpdate: "IMMEDIATELY",
         });
-        onProgress(`已生成元素 ${index + 1}/${elements.length}`);
+        if (isPhaseBoundary) {
+          currentPhase += 1;
+          onProgress(`已展开 ${currentPhase}/${totalPhases} 段`);
+        }
       }
 
       if (elements.length > 0) {
@@ -576,7 +597,7 @@ export default function App() {
             appState: sanitizeAppState(api.getAppState()),
             files: snapshotRef.current.files,
           },
-          result.title || "AI生图表",
+          doc.title || "白板讲解长图",
         );
         persistDirty(true);
       }
@@ -584,11 +605,462 @@ export default function App() {
     [persistDirty, saveSnapshotToHistory],
   );
 
-  const insertAiImage = useCallback(async (result: AiImageResult) => {
+  // 旧的非流式实现，作为桥接缺失时的兜底
+  const runDiagramFallback = useCallback(
+    async (
+      request: {
+        model: AiModelConfig;
+        original: string;
+        intent: string;
+        theme: PosterTheme;
+      },
+      onProgress: (message: string) => void,
+      onNeedRepair: (doc: PosterDocument, diff: CharDiff) => void,
+    ) => {
+      const original = request.original;
+      let attempt = 0;
+      let lastDiff: CharDiff | null = null;
+      let lastDoc: PosterDocument | null = null;
+      while (attempt <= POSTER_RETRY_LIMIT) {
+        onProgress(attempt === 0 ? "发送原文与切块系统提示词到语言模型..." : `第 ${attempt} 次重试...`);
+        const userMessage = assembleUserMessage(original, request.intent, request.theme, lastDiff);
+        const result = await window.excalidaw?.generateAiDiagram({
+          model: request.model,
+          prompt: userMessage,
+          diagramKind: request.theme,
+        });
+        if (!result) throw new Error("没有收到语言模型返回。");
+        const modules = normalizeModules((result as { modules?: unknown }).modules);
+        const doc: PosterDocument = { title: typeof result.title === "string" ? result.title : "", modules };
+        const diff = validatePoster(doc, original);
+        if (diff.ok) {
+          await renderPosterDocument(doc, request.theme, onProgress);
+          return;
+        }
+        lastDiff = diff;
+        lastDoc = doc;
+        attempt += 1;
+      }
+      if (lastDoc && lastDiff) onNeedRepair(lastDoc, lastDiff);
+    },
+    [renderPosterDocument],
+  );
+
+  const generateAiDiagram = useCallback(
+    async (
+      request: {
+        model: AiModelConfig;
+        original: string;
+        intent: string;
+        theme: PosterTheme;
+      },
+      onProgress: (message: string) => void,
+      onNeedRepair: (doc: PosterDocument, diff: CharDiff) => void,
+    ) => {
+      const api = excalidrawAPIRef.current;
+      if (!api) {
+        throw new Error("画布还没有准备好。");
+      }
+
+      const original = request.original;
+      if (!original.trim()) {
+        throw new Error("请填写内容原文。");
+      }
+
+      const v2Supported = typeof window.excalidaw?.generateAiDiagramStreamV2 === "function";
+      const v1Supported = typeof window.excalidaw?.generateAiDiagramStream === "function";
+
+      if (!v2Supported && !v1Supported) {
+        return runDiagramFallback(request, onProgress, onNeedRepair);
+      }
+
+      onProgress("开始流式生成（V2 章节 + pattern）...");
+
+      const startedAt = Date.now();
+      const appState = api.getAppState();
+      const offsetX = -appState.scrollX + 80;
+      const offsetY = -appState.scrollY + 80;
+      const origin = { x: offsetX, y: offsetY };
+      let yCursor = origin.y + POSTER_PADDING;
+
+      const baseElements = api.getSceneElementsIncludingDeleted();
+      const sessionElements: ExcalidrawElement[] = [];
+      const collectedSections: unknown[] = [];
+      let docTitle = "";
+      let titleRendered = false;
+      let overviewRendered = false;
+      let totalEmitted = 0;
+      const streamId = `diagramv2_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+      const flush = (skels: Parameters<typeof convertToExcalidrawElements>[0]) => {
+        if (!skels || skels.length === 0) return;
+        const newOnes = convertToExcalidrawElements(skels, { regenerateIds: true });
+        sessionElements.push(...newOnes);
+        api.updateScene({
+          elements: [...baseElements, ...sessionElements],
+          captureUpdate: "IMMEDIATELY",
+        });
+        api.scrollToContent(newOnes, { fitToContent: false });
+      };
+
+      const renderTitleIfNeeded = (title: string) => {
+        if (titleRendered || !title) return;
+        titleRendered = true;
+        docTitle = title;
+        const r = renderTitleV2(title, request.theme, origin, yCursor);
+        flush(r.elements);
+        yCursor = r.nextY;
+      };
+
+      const renderOverviewItems = (items: string[]) => {
+        if (overviewRendered || items.length === 0) return;
+        overviewRendered = true;
+        const r = renderOverviewV2(items, request.theme, origin, yCursor);
+        flush(r.elements);
+        yCursor = r.nextY;
+      };
+
+      const drainSection = (raw: unknown) => {
+        if (!raw || typeof raw !== "object") return;
+        const section = raw as {
+          no?: number;
+          label?: string;
+          body?: unknown[];
+          source?: string;
+        };
+        if (!Array.isArray(section.body)) return;
+        // Sanitize patterns: drop ones with unknown pattern names
+        const knownPatterns = new Set([
+          "free_paragraph",
+          "central_negation",
+          "triplet_circles",
+          "contrast_card",
+          "formula_chain",
+          "triplet_list",
+          "scene_with_quotes",
+          "case_box",
+          "highlight",
+          "summary",
+        ]);
+        const cleanBody = section.body.filter(
+          (p): p is { pattern: string } =>
+            typeof p === "object" &&
+            p !== null &&
+            typeof (p as { pattern?: unknown }).pattern === "string" &&
+            knownPatterns.has((p as { pattern: string }).pattern),
+        );
+        if (cleanBody.length === 0) return;
+        const cleanSection = {
+          no: section.no,
+          label: section.label,
+          body: cleanBody as never,
+          source: typeof section.source === "string" ? section.source : "",
+        };
+        collectedSections.push(cleanSection);
+        totalEmitted += 1;
+        // 0.2.11 行为：每收到一章就立刻画
+        const r = renderSectionV2(cleanSection as never, request.theme, origin, yCursor);
+        flush(r.elements);
+        yCursor = r.nextY;
+        onProgress(
+          `已生成第 ${totalEmitted} 章「${section.label ?? ""}」（${Math.round(
+            (Date.now() - startedAt) / 1000,
+          )}s）`,
+        );
+      };
+
+      let streamError: string | null = null;
+
+      if (v2Supported) {
+        let firstSignalSeen = false;
+        const unsubscribe = window.excalidaw!.onDiagramStreamV2Event((event) => {
+          if (event.streamId !== streamId) return;
+          firstSignalSeen = true;
+          if (event.kind === "title") {
+            renderTitleIfNeeded(event.title);
+          } else if (event.kind === "overview") {
+            // 先确保 title 出现（title 可能比 overview 晚到，但我们以先到的为准）
+            renderOverviewItems(event.items);
+          } else if (event.kind === "section") {
+            drainSection(event.section);
+          } else if (event.kind === "error") {
+            streamError = event.message;
+          }
+        });
+
+        // 心跳：让 UI 显示"还在等模型首字节"，避免空白时用户以为卡死。
+        const heartbeatId = window.setInterval(() => {
+          const seconds = Math.round((Date.now() - startedAt) / 1000);
+          if (!firstSignalSeen) {
+            onProgress(`等待模型首字节（已等 ${seconds}s，最长 75s）...`);
+          }
+        }, 3000);
+
+        try {
+          const userMessage = assembleUserMessage(original, request.intent, request.theme, null);
+          const result = await window.excalidaw!.generateAiDiagramStreamV2(
+            {
+              model: request.model,
+              prompt: userMessage,
+              diagramKind: request.theme,
+            },
+            streamId,
+          );
+          if (!result.ok) {
+            throw new Error(result.message || streamError || "流式生成失败");
+          }
+          if (streamError) {
+            throw new Error(streamError);
+          }
+        } finally {
+          window.clearInterval(heartbeatId);
+          unsubscribe();
+        }
+
+        if (collectedSections.length === 0) {
+          throw new Error("流式生成结束，但模型没有给出任何章节。");
+        }
+
+        // 贫瘠检查：模型偷懒只用 free_paragraph 时给出提示。不阻塞画布展示。
+        let totalPatterns = 0;
+        let freeParaCount = 0;
+        for (const s of collectedSections) {
+          const body = (s as { body?: Array<{ pattern?: string }> }).body ?? [];
+          for (const p of body) {
+            totalPatterns += 1;
+            if (p?.pattern === "free_paragraph") freeParaCount += 1;
+          }
+        }
+        const freeRatio = totalPatterns > 0 ? freeParaCount / totalPatterns : 0;
+        if (totalPatterns >= 4 && freeRatio > 0.7) {
+          onProgress(
+            `⚠ 这次生成偏单调：${freeParaCount}/${totalPatterns} 个段落都是普通段（${Math.round(
+              freeRatio * 100,
+            )}%）。`,
+          );
+        }
+
+        // 字符覆盖度仅作警告 —— 不再动渲染结果。
+        // 模型漏字时，让用户自己看见缺失，而不是自动补回（自动补回会污染画面）。
+        const genText = collectedSections
+          .map((s) => {
+            const body = (s as { body?: Array<{ pattern?: string; text?: string; wrong?: string; right?: string; items?: string[]; scene?: string; quotes?: string[]; punch?: string; quote?: string; body?: string; center?: string; options?: string[] }> }).body ?? [];
+            return body
+              .map((p) => {
+                const parts: string[] = [];
+                const pushS = (v: unknown) => { if (typeof v === "string") parts.push(v); };
+                const pushA = (v: unknown) => { if (Array.isArray(v)) for (const it of v) pushS(it); };
+                pushS(p.text);
+                pushS(p.wrong);
+                pushS(p.right);
+                pushS(p.scene);
+                pushA(p.quotes);
+                pushS(p.punch);
+                pushS(p.quote);
+                pushS(p.body);
+                pushS(p.center);
+                pushA(p.items);
+                pushA(p.options);
+                return parts.join("");
+              })
+              .join("");
+          })
+          .join("");
+        const ws = /[\s　​‌‍﻿]+/g;
+        const genLen = genText.replace(ws, "").length;
+        const origLen = original.replace(ws, "").length;
+        const coverage = origLen > 0 ? Math.round((genLen / origLen) * 100) : 100;
+
+        onProgress(
+          `生成完成 — ${totalEmitted} 章 / ${Math.round((Date.now() - startedAt) / 1000)}s / 原文覆盖 ${coverage}%（${genLen}/${origLen} 字）。`,
+        );
+        if (genLen < origLen) {
+          onProgress(
+            `⚠ 模型实际覆盖原文 ${coverage}%，少了 ${origLen - genLen} 字。如果对原文完整度有要求，可重新生成或换更聪明的模型。`,
+          );
+        }
+
+        saveSnapshotToHistory(
+          {
+            elements: [...baseElements, ...sessionElements],
+            appState: sanitizeAppState(api.getAppState()),
+            files: snapshotRef.current.files,
+          },
+          docTitle || "白板讲解长图",
+        );
+        api.scrollToContent(sessionElements, { fitToContent: true });
+        persistDirty(true);
+        return;
+      }
+
+      // —— v2 不可用，回退到 v1 流式 ——
+      const collectedModules: PosterModule[] = [];
+      const unsubscribe = window.excalidaw!.onDiagramStreamEvent((event) => {
+        if (event.streamId !== streamId) return;
+        if (event.kind === "title") {
+          docTitle = event.title;
+        } else if (event.kind === "module") {
+          const normalized = normalizeModules([event.module]);
+          if (normalized.length === 0) return;
+          const m = normalized[0];
+          const { elements: skel, nextY } = renderSingleModule(m, request.theme, origin, yCursor);
+          if (skel.length === 0) return;
+          flush(skel as never);
+          collectedModules.push(m);
+          yCursor = nextY;
+          totalEmitted += 1;
+          onProgress(`已生成 ${totalEmitted} 个模块（${Math.round((Date.now() - startedAt) / 1000)}s）`);
+        } else if (event.kind === "error") {
+          streamError = event.message;
+        }
+      });
+
+      try {
+        const userMessage = assembleUserMessage(original, request.intent, request.theme, null);
+        const result = await window.excalidaw!.generateAiDiagramStream(
+          {
+            model: request.model,
+            prompt: userMessage,
+            diagramKind: request.theme,
+          },
+          streamId,
+        );
+        if (!result.ok) {
+          throw new Error(result.message || streamError || "流式生成失败");
+        }
+        if (streamError) {
+          throw new Error(streamError);
+        }
+      } finally {
+        unsubscribe();
+      }
+
+      const doc: PosterDocument = { title: docTitle, modules: collectedModules };
+      const diff = validatePoster(doc, original);
+      if (!diff.ok) {
+        onProgress(`流式生成完成，原文校验失败：${diffSummary(diff)}`);
+        onNeedRepair(doc, diff);
+        return;
+      }
+      onProgress(`流式生成完成，共 ${collectedModules.length} 个模块 / ${Math.round((Date.now() - startedAt) / 1000)}s。`);
+      saveSnapshotToHistory(
+        {
+          elements: [...baseElements, ...sessionElements],
+          appState: sanitizeAppState(api.getAppState()),
+          files: snapshotRef.current.files,
+        },
+        docTitle || "白板讲解长图",
+      );
+      api.scrollToContent(sessionElements, { fitToContent: true });
+      persistDirty(true);
+    },
+    [persistDirty, runDiagramFallback, saveSnapshotToHistory],
+  );
+
+  const generateLogicManuscript = useCallback(
+    async (
+      request: {
+        original: string;
+        theme: PosterTheme;
+        export: LogicExportMode;
+      },
+      onProgress: (message: string) => void,
+    ) => {
+      const api = excalidrawAPIRef.current;
+      if (!api) {
+        throw new Error("画布还没有准备好。");
+      }
+
+      const original = request.original.trim();
+      if (!original) {
+        throw new Error("请填写内容原文。");
+      }
+
+      const appState = api.getAppState();
+      const offsetX = -appState.scrollX + 80;
+      const offsetY = -appState.scrollY + 80;
+
+      onProgress("正在按句子切分原文并识别逻辑链路...");
+      const { ir, layout } = buildAndRenderLogic(original, request.export, request.theme, {
+        x: offsetX,
+        y: offsetY,
+      });
+
+      const check = validateIrCoverage(ir);
+      if (!check.ok) {
+        throw new Error(check.message);
+      }
+
+      onProgress(check.message);
+      onProgress(
+        `已切分 ${ir.sentences.length} 句，${ir.edges.length} 条逻辑箭头，${ir.chains.length} 条逻辑链。`,
+      );
+
+      const elements = convertToExcalidrawElements(layout.elements, { regenerateIds: true });
+      const baseElements = api.getSceneElementsIncludingDeleted();
+      onProgress(`正在绘制 ${elements.length} 个元素...`);
+
+      const phaseBreaks = layout.phaseBreaks.length > 0 ? layout.phaseBreaks : [elements.length];
+      const breakSet = new Set(phaseBreaks);
+      const intraDelay = elements.length > 200 ? 20 : 32;
+      const phaseDelay = 260;
+
+      for (let index = 0; index < elements.length; index += 1) {
+        const isPhaseBoundary = breakSet.has(index);
+        const delay = index === 0 ? 120 : isPhaseBoundary ? phaseDelay : intraDelay;
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
+        api.updateScene({
+          elements: [...baseElements, ...elements.slice(0, index + 1)],
+          captureUpdate: "IMMEDIATELY",
+        });
+      }
+
+      if (elements.length > 0) {
+        api.scrollToContent(elements, { fitToContent: true });
+        const titleSlice = ir.title ? ir.normalized.slice(ir.title.start, ir.title.end) : "";
+        saveSnapshotToHistory(
+          {
+            elements: [...baseElements, ...elements],
+            appState: sanitizeAppState(api.getAppState()),
+            files: snapshotRef.current.files,
+          },
+          titleSlice || (request.export === "lecture" ? "讲义长图" : "逻辑导图"),
+        );
+        persistDirty(true);
+      }
+
+      onProgress(
+        `手稿绘图完成 — ${request.export === "lecture" ? "讲义长图" : "逻辑导图"}，${elements.length} 个元素。`,
+      );
+    },
+    [persistDirty, saveSnapshotToHistory],
+  );
+
+  const acceptPosterRepair = useCallback(
+    async (
+      doc: PosterDocument,
+      theme: PosterTheme,
+      original: string,
+      onProgress: (message: string) => void,
+    ) => {
+      const repaired = repairDocument(doc, original);
+      const recheck = validatePoster(repaired, original);
+      if (!recheck.ok) {
+        onProgress(`本地修复后仍有差异：${diffSummary(recheck)}（已尽力补救）`);
+      } else {
+        onProgress("已按原文强制修复，开始渲染...");
+      }
+      void collectDocumentText;
+      await renderPosterDocument(repaired, theme, onProgress);
+    },
+    [renderPosterDocument],
+  );
+
+  const insertAiImage = useCallback(async (result: AiImageResult): Promise<InsertedAiImage | null> => {
     const api = excalidrawAPIRef.current;
 
     if (!api) {
-      return;
+      return null;
     }
 
     const fileId = `ai_${Date.now().toString(36)}` as FileId;
@@ -642,7 +1114,103 @@ export default function App() {
       "生成图片",
     );
     persistDirty(true);
+
+    return {
+      elementId: imageElement.id,
+      fileId,
+      x,
+      y,
+      width: canvasSize.width,
+      height: canvasSize.height,
+    };
   }, [persistDirty, saveSnapshotToHistory]);
+
+  // 四张手稿图模式：一次性把 4 张 9:16 图片横向插入画布。
+  // 与 insertAiImage 不同的是：固定尺寸 405x720，统一 addFiles/updateScene/历史快照一次，避免 4 次跳屏。
+  const insertAiImages = useCallback(async (results: AiImageResult[]): Promise<InsertedAiImage[]> => {
+    const api = excalidrawAPIRef.current;
+
+    if (!api || results.length === 0) {
+      return [];
+    }
+
+    const MANUSCRIPT_WIDTH = 405;
+    const MANUSCRIPT_HEIGHT = 720;
+    const GAP = 48;
+
+    const appState = api.getAppState();
+    const startX = -appState.scrollX + 80;
+    const startY = -appState.scrollY + 80;
+
+    const now = Date.now();
+    const files: BinaryFileData[] = results.map((result, index) => ({
+      id: `ai_${now.toString(36)}_${index}` as FileId,
+      mimeType: result.mimeType as BinaryFileData["mimeType"],
+      dataURL: result.dataUrl as BinaryFileData["dataURL"],
+      created: now,
+      lastRetrieved: now,
+    }));
+
+    api.addFiles(files);
+
+    const skeletons = files.map((file, index) => ({
+      type: "image" as const,
+      x: startX + index * (MANUSCRIPT_WIDTH + GAP),
+      y: startY,
+      width: MANUSCRIPT_WIDTH,
+      height: MANUSCRIPT_HEIGHT,
+      fileId: file.id,
+      status: "saved" as const,
+    }));
+
+    const newImageElements = convertToExcalidrawElements(skeletons, { regenerateIds: true });
+    const nextElements = [...api.getSceneElementsIncludingDeleted(), ...newImageElements];
+    const nextFiles = files.reduce<BinaryFiles>(
+      (acc, file) => {
+        acc[file.id] = file;
+        return acc;
+      },
+      { ...snapshotRef.current.files },
+    );
+
+    api.updateScene({
+      elements: nextElements,
+      captureUpdate: "IMMEDIATELY",
+    });
+    api.scrollToContent(newImageElements, { fitToContent: true });
+    saveSnapshotToHistory(
+      {
+        elements: nextElements,
+        appState: sanitizeAppState(api.getAppState()),
+        files: nextFiles,
+      },
+      "生成四张手稿图",
+    );
+    persistDirty(true);
+
+    return newImageElements.map((element, index) => ({
+      elementId: element.id,
+      fileId: files[index].id,
+      x: skeletons[index].x,
+      y: skeletons[index].y,
+      width: MANUSCRIPT_WIDTH,
+      height: MANUSCRIPT_HEIGHT,
+    }));
+  }, [persistDirty, saveSnapshotToHistory]);
+
+  // 把指定 id 的元素居中显示在画布中央（视角移动，不动元素）。
+  const focusAiImage = useCallback((elementId: string) => {
+    const api = excalidrawAPIRef.current;
+    if (!api) return;
+
+    const target = api
+      .getSceneElementsIncludingDeleted()
+      .find((element) => element.id === elementId && !element.isDeleted);
+
+    if (!target) return;
+
+    api.scrollToContent([target], { fitToContent: true });
+  }, []);
 
   useEffect(() => {
     return window.excalidaw?.onMenuCommand(({ command }) => {
@@ -698,7 +1266,11 @@ export default function App() {
             onSettingsChange={updateAiSettings}
             onGenerateImage={generateAiImage}
             onGenerateDiagram={generateAiDiagram}
+            onAcceptRepair={acceptPosterRepair}
+            onGenerateLogic={generateLogicManuscript}
             onInsertImage={insertAiImage}
+            onInsertImages={insertAiImages}
+            onFocusImage={focusAiImage}
           />
         ) : null}
 

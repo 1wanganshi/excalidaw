@@ -1,34 +1,74 @@
 import { useMemo, useState } from "react";
 import { createDefaultPrompt, getNextPromptName } from "./storage";
+import { POSTER_THEME_ORDER, POSTER_THEMES } from "./poster/themes";
+import { diffSummary, type CharDiff } from "./poster/validate";
+import {
+  generateImagePrompt,
+  splitContentIntoFourParts,
+  type ManuscriptItemStatus,
+} from "./manuscript";
+import type { LogicExportMode } from "./logic/types";
 import type {
-  AiDiagramRequest,
   AiImageRequest,
   AiImageResult,
+  AiModelConfig,
   AiSettings,
-  DiagramKind,
   ImageAspectRatio,
   ImageResolution,
+  InsertedAiImage,
+  PosterDocument,
+  PosterTheme,
   PromptPreset,
 } from "./types";
 
-type AiMode = "image" | "diagram";
+type AiMode = "image" | "diagram" | "manuscript" | "logic";
+
+type ManuscriptItem = {
+  index: 0 | 1 | 2 | 3;
+  text: string;
+  prompt: string;
+  result?: AiImageResult;
+  elementId?: string;
+  status: ManuscriptItemStatus;
+  error?: string;
+};
+
+type PosterGenerateRequest = {
+  model: AiModelConfig;
+  original: string;
+  intent: string;
+  theme: PosterTheme;
+};
+
+type LogicGenerateRequest = {
+  original: string;
+  theme: PosterTheme;
+  export: LogicExportMode;
+};
 
 type AiPanelProps = {
   settings: AiSettings;
   onSettingsChange: (settings: AiSettings) => void;
   onGenerateImage: (request: AiImageRequest, onProgress: (message: string) => void) => Promise<AiImageResult>;
-  onGenerateDiagram: (request: AiDiagramRequest, onProgress: (message: string) => void) => Promise<void>;
-  onInsertImage: (result: AiImageResult) => Promise<void>;
+  onGenerateDiagram: (
+    request: PosterGenerateRequest,
+    onProgress: (message: string) => void,
+    onNeedRepair: (doc: PosterDocument, diff: CharDiff) => void,
+  ) => Promise<void>;
+  onAcceptRepair: (
+    doc: PosterDocument,
+    theme: PosterTheme,
+    original: string,
+    onProgress: (message: string) => void,
+  ) => Promise<void>;
+  onGenerateLogic: (
+    request: LogicGenerateRequest,
+    onProgress: (message: string) => void,
+  ) => Promise<void>;
+  onInsertImage: (result: AiImageResult) => Promise<InsertedAiImage | null>;
+  onInsertImages: (results: AiImageResult[]) => Promise<InsertedAiImage[]>;
+  onFocusImage: (elementId: string) => void;
 };
-
-const diagramOptions: Array<{ value: DiagramKind; label: string }> = [
-  { value: "flowchart", label: "流程图" },
-  { value: "fishbone", label: "鱼骨图" },
-  { value: "mindmap", label: "思维导图" },
-  { value: "architecture", label: "架构图" },
-  { value: "timeline", label: "时间线" },
-  { value: "custom", label: "自定义" },
-];
 
 const aspectRatioOptions: ImageAspectRatio[] = ["1:1", "9:16", "16:9", "3:4", "4:3", "2:3", "3:2"];
 const resolutionOptions: Array<{ value: ImageResolution; label: string }> = [
@@ -41,25 +81,59 @@ function getPromptName(prompt: PromptPreset, index: number) {
   return prompt.name.trim() || `提示词${index + 1}`;
 }
 
+function renderManuscriptStatus(status: ManuscriptItemStatus): string {
+  switch (status) {
+    case "pending":
+      return "待生成";
+    case "generating":
+      return "生成中...";
+    case "ready":
+      return "已生成";
+    case "inserted":
+      return "已入画布";
+    case "error":
+      return "失败";
+    default:
+      return "";
+  }
+}
+
 export default function AiPanel({
   settings,
   onSettingsChange,
   onGenerateImage,
   onGenerateDiagram,
+  onAcceptRepair,
+  onGenerateLogic,
   onInsertImage,
+  onInsertImages,
+  onFocusImage,
 }: AiPanelProps) {
   const [mode, setMode] = useState<AiMode>("image");
-  const [diagramKind, setDiagramKind] = useState<DiagramKind>("flowchart");
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>("1:1");
   const [imageResolution, setImageResolution] = useState<ImageResolution>("1k");
-  const [diagramUserRequirement, setDiagramUserRequirement] = useState("");
+  const [posterTheme, setPosterTheme] = useState<PosterTheme>("whiteboard");
+  const [posterOriginal, setPosterOriginal] = useState("");
+  const [posterIntent, setPosterIntent] = useState("");
+  const [logicOriginal, setLogicOriginal] = useState("");
+  const [logicExport, setLogicExport] = useState<LogicExportMode>("lecture");
+  const [pendingRepair, setPendingRepair] = useState<{
+    doc: PosterDocument;
+    diff: CharDiff;
+    original: string;
+    theme: PosterTheme;
+  } | null>(null);
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [editingText, setEditingText] = useState("");
   const [progress, setProgress] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [lastImageResult, setLastImageResult] = useState<AiImageResult | null>(null);
+  // 四张手稿图相关状态
+  const [manuscriptText, setManuscriptText] = useState("");
+  const [manuscriptItems, setManuscriptItems] = useState<ManuscriptItem[]>([]);
+  const [activeManuscriptIndex, setActiveManuscriptIndex] = useState<0 | 1 | 2 | 3 | null>(null);
 
   const selectedImageModel = useMemo(
     () => settings.imageModels.find((model) => model.id === settings.selectedImageModelId) ?? settings.imageModels[0],
@@ -131,12 +205,12 @@ export default function AiPanel({
   };
 
   const generate = async () => {
-    const selectedModel = mode === "image" ? selectedImageModel : selectedLanguageModel;
+    const selectedModel = mode === "image" || mode === "manuscript" ? selectedImageModel : selectedLanguageModel;
     const imagePromptText = imagePrompt.trim();
-    const requirementText = diagramUserRequirement.trim();
+    const originalText = posterOriginal;
 
-    if (!selectedModel) {
-      appendProgress(mode === "image" ? "请先在设置中新增生图大模型。" : "请先在设置中新增语言大模型。");
+    if (mode !== "logic" && !selectedModel) {
+      appendProgress(mode === "diagram" ? "请先在设置中新增语言大模型。" : "请先在设置中新增生图大模型。");
       return;
     }
 
@@ -145,15 +219,38 @@ export default function AiPanel({
       return;
     }
 
-    if (mode === "diagram" && !requirementText) {
-      appendProgress("请先填写用户要求。");
+    if (mode === "diagram" && !originalText.trim()) {
+      appendProgress("请先粘贴内容原文。");
+      return;
+    }
+
+    if (mode === "manuscript" && !manuscriptText.trim()) {
+      appendProgress("请输入要生成图片的内容。");
+      return;
+    }
+
+    if (mode === "logic" && !logicOriginal.trim()) {
+      appendProgress("请先粘贴内容原文。");
       return;
     }
 
     setIsGenerating(true);
     setProgress([]);
     setLastImageResult(null);
-    appendProgress(mode === "image" ? "准备图片生成请求..." : "准备AI生图表请求...");
+    setPendingRepair(null);
+    if (mode === "manuscript") {
+      setManuscriptItems([]);
+      setActiveManuscriptIndex(null);
+    }
+    appendProgress(
+      mode === "manuscript"
+        ? "准备四张手稿图生成..."
+        : mode === "image"
+          ? "准备图片生成请求..."
+          : mode === "logic"
+            ? "准备手稿逻辑绘图（本地，无需模型）..."
+            : "准备图表生成请求...",
+    );
 
     try {
       if (mode === "image") {
@@ -171,10 +268,31 @@ export default function AiPanel({
         appendProgress("图片已生成，正在按原始比例放入画布...");
         await onInsertImage(result);
         appendProgress("图片已按原始比例放入画布。");
+      } else if (mode === "manuscript") {
+        await runManuscriptGeneration(selectedModel!);
+      } else if (mode === "logic") {
+        await onGenerateLogic(
+          {
+            original: logicOriginal,
+            theme: posterTheme,
+            export: logicExport,
+          },
+          appendProgress,
+        );
       } else {
-        appendProgress("将内置专业图表系统提示词和用户要求发送给语言模型...");
-        await onGenerateDiagram({ model: selectedModel, prompt: requirementText, diagramKind }, appendProgress);
-        appendProgress("AI生图表已在画布上流式生成完成。");
+        appendProgress(`已选择主题：${POSTER_THEMES[posterTheme].label}。`);
+        await onGenerateDiagram(
+          {
+            model: selectedModel,
+            original: originalText,
+            intent: posterIntent,
+            theme: posterTheme,
+          },
+          appendProgress,
+          (doc, diff) => {
+            setPendingRepair({ doc, diff, original: originalText, theme: posterTheme });
+          },
+        );
       }
     } catch (error) {
       appendProgress(error instanceof Error ? error.message : "生成失败。");
@@ -183,51 +301,247 @@ export default function AiPanel({
     }
   };
 
+  // 拆分原文 -> 顺序生成 4 张 9:16 手稿图 -> 4 张全部就绪后一次性插入画布
+  const runManuscriptGeneration = async (selectedModel: AiModelConfig) => {
+    appendProgress("正在拆分为 4 段...");
+    const parts = splitContentIntoFourParts(manuscriptText);
+    appendProgress(`已拆分完成：${parts.map((part) => part.length).join(" / ")} 字。`);
+
+    const initialItems: ManuscriptItem[] = parts.map((text, index) => ({
+      index: index as 0 | 1 | 2 | 3,
+      text,
+      prompt: generateImagePrompt(text, index),
+      status: "pending",
+    }));
+    setManuscriptItems(initialItems);
+
+    const workingItems = [...initialItems];
+    let hasFailure = false;
+
+    for (let i = 0; i < workingItems.length; i += 1) {
+      workingItems[i] = { ...workingItems[i], status: "generating" };
+      setManuscriptItems([...workingItems]);
+      appendProgress(`正在生成第 ${i + 1}/4 张手稿图...`);
+
+      try {
+        const result = await onGenerateImage(
+          {
+            model: selectedModel,
+            prompt: workingItems[i].prompt,
+            aspectRatio: "9:16",
+            resolution: imageResolution,
+          },
+          appendProgress,
+        );
+        workingItems[i] = { ...workingItems[i], status: "ready", result };
+        setManuscriptItems([...workingItems]);
+      } catch (error) {
+        hasFailure = true;
+        const message = error instanceof Error ? error.message : "生图失败。";
+        workingItems[i] = { ...workingItems[i], status: "error", error: message };
+        setManuscriptItems([...workingItems]);
+        appendProgress(`第 ${i + 1} 张生成失败：${message}`);
+      }
+    }
+
+    if (hasFailure) {
+      appendProgress("部分图片生成失败，请点击「重试失败项」继续。");
+      return;
+    }
+
+    await insertManuscriptResults(workingItems);
+  };
+
+  // 把所有 ready 的图片一次性插入画布，并把 elementId 写回 items。
+  const insertManuscriptResults = async (currentItems: ManuscriptItem[]) => {
+    const allReady = currentItems.every((item) => item.status === "ready" && item.result);
+    if (!allReady) return;
+
+    appendProgress("四张图片已生成，正在放入画布...");
+    const inserted = await onInsertImages(currentItems.map((item) => item.result as AiImageResult));
+
+    const updated = currentItems.map((item, index) => {
+      const meta = inserted[index];
+      if (!meta) return item;
+      return { ...item, status: "inserted" as ManuscriptItemStatus, elementId: meta.elementId };
+    });
+    setManuscriptItems(updated);
+    setActiveManuscriptIndex(0);
+
+    const firstId = updated[0]?.elementId;
+    if (firstId) {
+      onFocusImage(firstId);
+    }
+    appendProgress("四张手稿图已放入画布。点击 1/2/3/4 可定位查看。");
+  };
+
+  // 只重生 status === "error" 的项。重生成功后若 4 张齐了则统一插入。
+  const retryManuscriptFailures = async () => {
+    if (!selectedImageModel || manuscriptItems.length === 0) return;
+    setIsGenerating(true);
+    try {
+      const workingItems = [...manuscriptItems];
+      for (let i = 0; i < workingItems.length; i += 1) {
+        if (workingItems[i].status !== "error") continue;
+        workingItems[i] = { ...workingItems[i], status: "generating", error: undefined };
+        setManuscriptItems([...workingItems]);
+        appendProgress(`正在重试第 ${i + 1}/4 张...`);
+        try {
+          const result = await onGenerateImage(
+            {
+              model: selectedImageModel,
+              prompt: workingItems[i].prompt,
+              aspectRatio: "9:16",
+              resolution: imageResolution,
+            },
+            appendProgress,
+          );
+          workingItems[i] = { ...workingItems[i], status: "ready", result };
+          setManuscriptItems([...workingItems]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "生图失败。";
+          workingItems[i] = { ...workingItems[i], status: "error", error: message };
+          setManuscriptItems([...workingItems]);
+          appendProgress(`第 ${i + 1} 张重试失败：${message}`);
+        }
+      }
+
+      if (workingItems.every((item) => item.status === "ready")) {
+        await insertManuscriptResults(workingItems);
+      }
+    } catch (error) {
+      appendProgress(error instanceof Error ? error.message : "重试失败。");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const focusManuscriptImage = (index: 0 | 1 | 2 | 3) => {
+    const item = manuscriptItems[index];
+    if (!item?.elementId) {
+      appendProgress(`第 ${index + 1} 张图片还未放入画布。`);
+      return;
+    }
+    setActiveManuscriptIndex(index);
+    onFocusImage(item.elementId);
+  };
+
+  const hasManuscriptFailure = manuscriptItems.some((item) => item.status === "error");
+  const manuscriptInsertedCount = manuscriptItems.filter((item) => !!item.elementId).length;
+
+  const handleAcceptRepair = async () => {
+    if (!pendingRepair) return;
+    setIsGenerating(true);
+    try {
+      appendProgress("接受人工补救：本地强制按原文修复并渲染...");
+      await onAcceptRepair(pendingRepair.doc, pendingRepair.theme, pendingRepair.original, appendProgress);
+      setPendingRepair(null);
+    } catch (error) {
+      appendProgress(error instanceof Error ? error.message : "本地修复失败。");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleCancelRepair = () => {
+    setPendingRepair(null);
+    appendProgress("已取消本次生成。");
+  };
+
   return (
     <aside className="ai-panel">
-      <div className="segmented panel-mode">
+      <div className="segmented panel-mode panel-mode-four">
         <button className={mode === "image" ? "active" : ""} type="button" onClick={() => setMode("image")}>
           AI生图
         </button>
         <button className={mode === "diagram" ? "active" : ""} type="button" onClick={() => setMode("diagram")}>
-          AI生图表
+          AI白板长图
+        </button>
+        <button className={mode === "logic" ? "active" : ""} type="button" onClick={() => setMode("logic")}>
+          手稿绘图
+        </button>
+        <button className={mode === "manuscript" ? "active" : ""} type="button" onClick={() => setMode("manuscript")}>
+          四张手稿图
         </button>
       </div>
 
-      <div className="panel-section">
-        <label>
-          {mode === "image" ? "生图模型" : "语言模型"}
-          <select
-            value={(mode === "image" ? selectedImageModel?.id : selectedLanguageModel?.id) ?? ""}
-            onChange={(event) =>
-              updateSettings(
-                mode === "image"
-                  ? { ...settings, selectedImageModelId: event.target.value }
-                  : { ...settings, selectedLanguageModelId: event.target.value },
-              )
-            }
-          >
-            {(mode === "image" ? settings.imageModels : settings.languageModels).length === 0 ? (
-              <option value="">未配置</option>
-            ) : null}
-            {(mode === "image" ? settings.imageModels : settings.languageModels).map((model, index) => (
-              <option key={model.id} value={model.id}>
-                {model.name || `${mode === "image" ? "生图模型" : "语言模型"}${index + 1}`}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+      {mode !== "logic" ? (
+        <div className="panel-section">
+          <label>
+            {mode === "diagram" ? "语言模型" : "生图模型"}
+            <select
+              value={(mode === "diagram" ? selectedLanguageModel?.id : selectedImageModel?.id) ?? ""}
+              onChange={(event) =>
+                updateSettings(
+                  mode === "diagram"
+                    ? { ...settings, selectedLanguageModelId: event.target.value }
+                    : { ...settings, selectedImageModelId: event.target.value },
+                )
+              }
+            >
+              {(mode === "diagram" ? settings.languageModels : settings.imageModels).length === 0 ? (
+                <option value="">未配置</option>
+              ) : null}
+              {(mode === "diagram" ? settings.languageModels : settings.imageModels).map((model, index) => (
+                <option key={model.id} value={model.id}>
+                  {model.name || `${mode === "diagram" ? "语言模型" : "生图模型"}${index + 1}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      ) : (
+        <div className="panel-section">
+          <p className="empty-settings">本地按原文绘制逻辑链路与箭头，无需配置语言模型。</p>
+        </div>
+      )}
+
+      {mode === "logic" ? (
+        <>
+          <div className="panel-section">
+            <label>
+              导出形态
+              <select value={logicExport} onChange={(event) => setLogicExport(event.target.value as LogicExportMode)}>
+                <option value="lecture">讲义长图（整句原文 + 条件箭头）</option>
+                <option value="mindmap">逻辑导图（关键词链 + 条件箭头）</option>
+              </select>
+            </label>
+          </div>
+          <div className="panel-section">
+            <label>
+              设计主题
+              <select value={posterTheme} onChange={(event) => setPosterTheme(event.target.value as PosterTheme)}>
+                {POSTER_THEME_ORDER.map((id) => (
+                  <option key={id} value={id}>
+                    {POSTER_THEMES[id].label} · {POSTER_THEMES[id].description}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="panel-section">
+            <label>
+              内容原文
+              <textarea
+                value={logicOriginal}
+                placeholder="粘贴口播稿或讲义原文。系统按句子切分、识别逻辑顺序，有顺序才画箭头；原文 100% 保留。"
+                onChange={(event) => setLogicOriginal(event.target.value)}
+                rows={14}
+              />
+            </label>
+          </div>
+        </>
+      ) : null}
 
       {mode === "diagram" ? (
         <>
           <div className="panel-section">
             <label>
-              图表类型
-              <select value={diagramKind} onChange={(event) => setDiagramKind(event.target.value as DiagramKind)}>
-                {diagramOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
+              设计主题
+              <select value={posterTheme} onChange={(event) => setPosterTheme(event.target.value as PosterTheme)}>
+                {POSTER_THEME_ORDER.map((id) => (
+                  <option key={id} value={id}>
+                    {POSTER_THEMES[id].label} · {POSTER_THEMES[id].description}
                   </option>
                 ))}
               </select>
@@ -236,14 +550,125 @@ export default function AiPanel({
 
           <div className="panel-section">
             <label>
-              用户要求
+              内容原文
               <textarea
-                value={diagramUserRequirement}
-                placeholder="写下这次要生成的具体内容，例如：用户从注册、登录、下单到支付成功的完整流程图。"
-                onChange={(event) => setDiagramUserRequirement(event.target.value)}
+                value={posterOriginal}
+                placeholder="把整篇文章粘进来。系统会自动识别段落、对错对比、公式步骤、案例、列表、总结，排成一张「白板讲解型」竖版长图，原文一字不删。"
+                onChange={(event) => setPosterOriginal(event.target.value)}
+                rows={12}
               />
             </label>
           </div>
+
+          <div className="panel-section">
+            <label>
+              意图提示（可选）
+              <textarea
+                value={posterIntent}
+                placeholder="例如：第二段重点圈出来 / 把流程用公式框 / 末尾加总结框。仅影响模块识别。"
+                onChange={(event) => setPosterIntent(event.target.value)}
+                rows={3}
+              />
+            </label>
+          </div>
+
+          {pendingRepair ? (
+            <div className="panel-section progress-box">
+              <h3>原文校验未通过，请选择补救方式</h3>
+              <p style={{ wordBreak: "break-all" }}>{diffSummary(pendingRepair.diff)}</p>
+              <div className="prompt-actions">
+                <button type="button" onClick={handleAcceptRepair} disabled={isGenerating}>
+                  强制只用原文（推荐）
+                </button>
+                <button type="button" onClick={handleCancelRepair} disabled={isGenerating}>
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : mode === "manuscript" ? (
+        <>
+          <div className="panel-section">
+            <label>
+              手稿原文
+              <textarea
+                value={manuscriptText}
+                placeholder="粘贴一段长文本。点击「生成四张手稿图」后，系统会自动拆成 4 段，分别生成 9:16 手稿风格图片，并按 1/2/3/4 顺序放入白板。"
+                onChange={(event) => setManuscriptText(event.target.value)}
+                rows={14}
+              />
+            </label>
+          </div>
+
+          <div className="panel-section">
+            <label>
+              清晰度
+              <select
+                value={imageResolution}
+                onChange={(event) => setImageResolution(event.target.value as ImageResolution)}
+              >
+                {resolutionOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="empty-settings" style={{ marginTop: 8 }}>
+              提示：系统会强制使用 9:16 竖版手稿风格，并在提示词中要求逐字呈现原文，但能否完全无遗漏取决于图片模型本身的文字渲染能力。
+            </p>
+          </div>
+
+          {manuscriptItems.length > 0 ? (
+            <>
+              <div className="panel-section">
+                <label>跳转图片</label>
+                <div className="manuscript-nav">
+                  {manuscriptItems.map((item) => (
+                    <button
+                      key={item.index}
+                      type="button"
+                      className={activeManuscriptIndex === item.index ? "active" : ""}
+                      disabled={!item.elementId}
+                      onClick={() => focusManuscriptImage(item.index)}
+                    >
+                      {item.index + 1}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="panel-section manuscript-item-list">
+                {manuscriptItems.map((item) => (
+                  <div className="manuscript-item" key={item.index}>
+                    <div className="manuscript-item-header">
+                      <span>
+                        第 {item.index + 1} 段 · {item.text.length} 字
+                      </span>
+                      <span>{renderManuscriptStatus(item.status)}</span>
+                    </div>
+                    {item.status === "error" && item.error ? (
+                      <div className="manuscript-item-error">{item.error}</div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+
+              {hasManuscriptFailure && manuscriptInsertedCount === 0 ? (
+                <div className="panel-section">
+                  <button
+                    className="primary-button full-width-button"
+                    type="button"
+                    onClick={retryManuscriptFailures}
+                    disabled={isGenerating}
+                  >
+                    {isGenerating ? "生成中..." : "重试失败项"}
+                  </button>
+                </div>
+              ) : null}
+            </>
+          ) : null}
         </>
       ) : (
         <>
@@ -333,12 +758,30 @@ export default function AiPanel({
 
       <div className="panel-section">
         <button className="primary-button full-width-button" type="button" onClick={generate} disabled={isGenerating}>
-          {isGenerating ? "生成中..." : mode === "image" ? "生成图片" : "流式生成到画布"}
+          {isGenerating
+            ? "生成中..."
+            : mode === "image"
+              ? "生成图片"
+              : mode === "manuscript"
+              ? "生成四张手稿图"
+              : mode === "logic"
+                ? logicExport === "lecture"
+                  ? "生成讲义长图"
+                  : "生成逻辑导图"
+                : "生成白板长图"}
         </button>
       </div>
 
       <div className="panel-section progress-box">
-        <h3>{mode === "image" ? "图片生成进度" : "画布生成进度"}</h3>
+        <h3>
+          {mode === "image"
+            ? "图片生成进度"
+            : mode === "manuscript"
+              ? "四张手稿图生成进度"
+              : mode === "logic"
+                ? "手稿绘图进度"
+                : "白板长图生成进度"}
+        </h3>
         {progress.length === 0 ? <p>等待开始。</p> : progress.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}
       </div>
 
