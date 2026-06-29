@@ -46,4 +46,7 @@ contextBridge.exposeInMainWorld("excalidaw", {
   generateLogicLayout(request) {
     return ipcRenderer.invoke("ai:generate-logic-layout", request);
   },
+  generatePosterDoc(request) {
+    return ipcRenderer.invoke("ai:generate-poster-doc", request);
+  },
 });

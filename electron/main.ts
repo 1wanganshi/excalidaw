@@ -1328,6 +1328,114 @@ function buildLogicLayoutSystemPrompt(): string {
   ].join("\n");
 }
 
+// ============================================================
+// 白板长图「设计感优先」模式：AI 直接产出可改写的 PosterDocumentV2
+// 不再保证原文一字不漏，AI 可提炼、改写、重组
+// ============================================================
+
+function buildPosterDirectorSystemPrompt(): string {
+  return [
+    "你是「白板长图设计师」。读者给你一段原文，请把它改写、提炼、重组成一张『一目了然 + 有设计感』的白板长图 JSON。",
+    "",
+    "# 核心原则（重要）",
+    "- 你不必复述原文。请像顶级设计师那样**提炼骨架**：抓主线 → 拆 3-6 个章节 → 每节挑 1-3 个最有信息密度的视觉块。",
+    "- 文字要短、要狠、要可视。能用 6 字标题就别用 12 字；能用 highlight 金句就别用整段叙述。",
+    "- 全图 free_paragraph 总占比 ≤ 25%。重要观点优先做成 highlight / contrast_card / triplet_list / case_box / formula_chain。",
+    "- 章节 label ≤ 8 字。highlight ≤ 30 字。triplet_list 每条 ≤ 32 字。contrast wrong/right 各 ≤ 24 字。formula 每步 ≤ 6 字。",
+    "- 章节之间要有视觉节奏：相邻 pattern 不同种；不要连续两个 highlight 或三个 free_paragraph。",
+    "",
+    "# 输出 JSON（无 markdown、无解释文字）",
+    "{",
+    '  "title": "≤ 18 字的主标题，可改写自原文核心论点",',
+    '  "overview": ["关键词1","关键词2","关键词3"],  // 可选；2-3 个，每个 ≤ 4 字',
+    '  "sections": [',
+    '    { "no": 1, "label": "≤8字章节名", "body": [ /* 1-3 个 pattern */ ] }',
+    "  ]",
+    "}",
+    "",
+    "# 10 种 pattern（直接写值，不再用句子 ID）",
+    '1. { "pattern": "highlight", "text": "≤30 字的金句/核心观点" }',
+    '2. { "pattern": "contrast_card", "wrong": "错误做法或常见误解", "right": "正确做法或真相" }',
+    '3. { "pattern": "triplet_list", "title": "可选，≤20 字小标题", "items": ["第一点", "第二点", "第三点"] }',
+    '4. { "pattern": "formula_chain", "items": ["原因","机制","结果"] } // 2-5 步骤，每步 ≤ 6 字',
+    '5. { "pattern": "case_box", "label": "可选，≤8 字标签", "punch": "可选开场金句", "wrong": "可选 ✘ 行", "right": "可选 ✓ 行", "body": "可选正文" }',
+    '6. { "pattern": "scene_with_quotes", "scene": "情境叙述（≤80 字）", "quotes": ["短引用1","短引用2"] }',
+    '7. { "pattern": "free_paragraph", "text": "自由叙述段，控制使用频率", "emphasis": "normal" | "red" }',
+    '8. { "pattern": "triplet_circles", "items": ["≤4字","≤4字","≤4字"] }  // 仅用于装饰性概览',
+    '9. { "pattern": "central_negation", "center": "≤8 字核心词", "options": ["错误选项1","错误选项2","错误选项3"] }',
+    '10. { "pattern": "summary", "text": "文末结论（≤40 字）" }',
+    "",
+    "# 章节模板（参考用，不强制）",
+    "- 引子节：scene_with_quotes 或 highlight（直接亮观点）",
+    "- 拆解节：highlight + triplet_list 或 formula_chain",
+    "- 对比节：contrast_card（避坑/纠错型内容）",
+    "- 步骤节：每个步骤一个 case_box；或一个 triplet_list 列出所有步骤",
+    "- 结语节：summary 或 highlight 作为视觉落点",
+    "",
+    "# 设计自检",
+    "- title 是否朗朗上口？label 是否 ≤8 字？",
+    "- 是否有至少 1 个 highlight 或 contrast_card 提供视觉锚点？",
+    "- 是否避免连续同种 pattern？",
+    "- 整图节奏：3-6 节，10-18 个 pattern 之间。",
+    "",
+    "现在请把用户在 <article></article> 中的原文改写成这样的 JSON。仅输出 JSON。",
+  ].join("\n");
+}
+
+ipcMain.handle("ai:generate-poster-doc", async (_event, request: AiDiagramRequest) => {
+  const { model, prompt } = request;
+
+  if (!model.baseUrl || !model.chatEndpoint || !model.model || !prompt.trim()) {
+    throw new Error("请填写语言模型配置并粘贴原文。");
+  }
+
+  const systemPrompt = buildPosterDirectorSystemPrompt();
+  const controller = new AbortController();
+  const timeoutMs = 120_000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(joinApiUrl(model.baseUrl, model.chatEndpoint), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...getAuthHeaders(model.apiKey),
+      },
+      body: JSON.stringify({
+        model: model.model,
+        temperature: 0.55,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: prompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if ((err as { name?: string })?.name === "AbortError") {
+      throw new Error(`AI 设计长图超时（${Math.round(timeoutMs / 1000)} 秒），将使用本地布局。`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`AI 设计长图失败：HTTP ${response.status} ${text.slice(0, 200)}`);
+  }
+
+  const payload = await response.json();
+  const parsed = extractJsonObject(extractTextResponse(payload));
+
+  if (!Array.isArray(parsed.sections)) {
+    throw new Error("AI 返回的 JSON 缺少 sections 数组。");
+  }
+
+  return parsed;
+});
+
 ipcMain.handle("ai:generate-logic-layout", async (_event, request: AiDiagramRequest) => {
   const { model, prompt } = request;
 

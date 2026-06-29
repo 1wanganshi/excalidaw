@@ -478,7 +478,7 @@ export default function AiPanel({
               checked={logicUseAi}
               onChange={(event) => setLogicUseAi(event.target.checked)}
             />
-            <span>AI 辅助布局（选 pattern + 分组，原文仍 100% 本地注入）</span>
+            <span>AI 设计感模式（允许 AI 提炼/改写/重组，不保证全文保留）</span>
           </label>
         </div>
       ) : (
@@ -541,7 +541,7 @@ export default function AiPanel({
               内容原文
               <textarea
                 value={logicOriginal}
-                placeholder="粘贴口播稿或讲义原文。本地切句保真；开启 AI 辅助时，模型负责选章节与 pattern，文字仍从原文注入。"
+                placeholder="粘贴文章原文。关闭 AI 设计感模式 → 本地切句，全文保留。开启 → AI 重写为高密度白板长图，可压缩 / 提炼 / 重组。"
                 onChange={(event) => setLogicOriginal(event.target.value)}
                 rows={12}
               />
@@ -552,7 +552,7 @@ export default function AiPanel({
               布局意图（可选）
               <textarea
                 value={logicIntent}
-                placeholder="例如：引子要抓痛点 / 三步方案各用步骤框 / 对比句要醒目 / 公式链横向展示"
+                placeholder="例如：风格要克制、给三个步骤、强调对比、用一句金句结尾。开启设计感模式时 AI 会参考这个意图改写。"
                 onChange={(event) => setLogicIntent(event.target.value)}
                 rows={3}
               />

@@ -104,6 +104,9 @@ declare global {
       generateLogicLayout(
         request: AiDiagramRequestPayload,
       ): Promise<Record<string, unknown>>;
+      generatePosterDoc(
+        request: AiDiagramRequestPayload,
+      ): Promise<Record<string, unknown>>;
     };
   }
 }

@@ -35,8 +35,7 @@ import { renderSectionV2, renderTitleV2, renderOverviewV2 } from "./poster/layou
 import { POSTER_PADDING } from "./poster/themes";
 import { buildAndRenderLogic } from "./logic/render";
 import { buildLogicManuscriptIR } from "./logic/buildIr";
-import { buildAiLayoutUserPrompt } from "./logic/buildAiLayoutPrompt";
-import { parseAiLayoutPlan, resolveLayoutPlan } from "./logic/resolveLayoutPlan";
+import { parsePosterDocV2 } from "./logic/parsePosterDoc";
 import { validateIrCoverage } from "./logic/validate";
 import type { LogicExportMode } from "./logic/types";
 import {
@@ -1007,27 +1006,32 @@ export default function App() {
         request.useAiLayout &&
         request.export === "lecture" &&
         request.model &&
-        typeof window.excalidaw?.generateLogicLayout === "function";
+        typeof window.excalidaw?.generatePosterDoc === "function";
 
       if (canUseAi) {
         try {
-          onProgress("AI 正在分析章节结构与 pattern 布局（不改写原文）...");
-          const userPrompt = buildAiLayoutUserPrompt(ir, request.intent);
-          const raw = await window.excalidaw!.generateLogicLayout({
+          onProgress("AI 正在重写为有设计感的白板长图（允许提炼/改写/重组）...");
+          const intent = request.intent?.trim()
+            ? `\n\n<intent>${request.intent.trim()}</intent>`
+            : "";
+          const userPrompt = `<article>\n${original}\n</article>${intent}`;
+          const raw = await window.excalidaw!.generatePosterDoc({
             model: request.model!,
             prompt: userPrompt,
-            diagramKind: "logic-layout",
+            diagramKind: "poster-doc",
           });
-          const plan = parseAiLayoutPlan(raw);
-          if (!plan) {
-            onProgress("AI 返回格式无效，回退本地布局。");
+          const doc = parsePosterDocV2(raw);
+          if (!doc) {
+            onProgress("AI 返回内容无法解析为合法长图，回退到本地全文保留布局。");
           } else {
-            const resolved = resolveLayoutPlan(ir, plan);
-            posterDoc = resolved.doc;
-            onProgress(resolved.message);
+            posterDoc = doc;
+            const patternCount = doc.sections.reduce((n, sec) => n + sec.body.length, 0);
+            onProgress(
+              `AI 设计完成：${doc.sections.length} 个章节，${patternCount} 个视觉块。`,
+            );
           }
         } catch (err) {
-          onProgress(`AI 布局失败：${(err as Error).message} 已回退本地布局。`);
+          onProgress(`AI 设计长图失败：${(err as Error).message} 已回退本地布局。`);
         }
       } else if (request.useAiLayout && request.export === "lecture") {
         onProgress("未配置语言模型，使用本地规则布局。");
