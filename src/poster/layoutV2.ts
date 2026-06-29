@@ -826,12 +826,11 @@ function patternSceneWithQuotes(
     color: theme.ink,
   });
   let cursor = yCursor + scene.h + 18;
-  for (const rawQ of p.quotes.filter((s) => s.length > 0)) {
-    // 引号是原文的一部分 —— 不能脱。
-    // 模型有时给的 quote 已经带引号（"快点写！"），有时没有。
-    // 如果没带就补一对中文双引号，跟 strictValidate 的处理保持一致。
+  for (const rawQ of p.quotes.filter((s) => s && s.trim().length > 1)) {
+    // 过滤掉只有引号/标点的空条目，避免孤儿引号独占一行
     const trimmed = rawQ.trim();
     if (!trimmed) continue;
+    if (/^["""'「『」』]+$/.test(trimmed)) continue;
     const hasQuote = /^["""'「『]/.test(trimmed) && /["""'」』]$/.test(trimmed);
     const quoteText = hasQuote ? trimmed : `"${trimmed}"`;
     const m = measure(quoteText, fs, CONTENT_WIDTH - 80);
@@ -897,8 +896,9 @@ function patternCaseBox(
     strokeWidth: theme.strokeWidth + 1,
     radius: 18,
   });
-  // label chip
-  const labelText = p.label && p.label.length > 0 ? p.label : "举个例子";
+  // label chip — 截断超长 label，避免 chip 撑爆框线
+  const rawLabel = p.label && p.label.length > 0 ? p.label : "举个例子";
+  const labelText = rawLabel.length > 8 ? rawLabel.slice(0, 7) + "…" : rawLabel;
   const fsLabel = theme.fontMeta;
   const labelW = textWidth(labelText, fsLabel) + 28;
   pushRect(out, {
@@ -1000,9 +1000,8 @@ function patternHighlight(
   p: PatternHighlight,
   theme: ThemeSpec,
 ): number {
-  // 手稿风：不再用红色圆角大框装整段。
-  // 改成：左对齐黑字（或局部红字）+ 字下方一根细红波浪线下划 + 句末一个小红圈。
-  // 视觉效果接近老师在白板上对一句话画重点，而不是海报上印一块红色卡片。
+  // 手稿风：左对齐黑字 + 字下方一根细红下划线。
+  // 不再画句末小红圈——避免视觉杂讯。
   const fs = theme.fontSection - 4; // 比章节小一点，比正文大
   const text = (p.text ?? "").trim();
   if (!text) return 0;
@@ -1030,22 +1029,6 @@ function patternHighlight(
     color: theme.red,
     strokeWidth: theme.strokeWidth - 1,
   });
-  // 句末小红圈（手稿"重点"标记）
-  const dotR = 8;
-  out.push({
-    type: "ellipse",
-    x: left + lastLineW + 8,
-    y: yCursor + Math.round(fs * 0.55) + lastLineIdx * lineH(fs),
-    width: dotR * 2,
-    height: dotR * 2,
-    strokeColor: theme.red,
-    backgroundColor: "transparent",
-    fillStyle: "solid",
-    strokeStyle: "solid",
-    strokeWidth: theme.strokeWidth - 1,
-    roughness: 2,
-    opacity: 100,
-  } as Skel);
   return m.h + 8;
 }
 

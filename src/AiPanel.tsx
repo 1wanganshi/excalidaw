@@ -720,7 +720,7 @@ export default function AiPanel({
             </>
           ) : null}
         </>
-      ) : (
+      ) : mode === "image" ? (
         <>
           <div className="panel-section">
             <label>
@@ -804,7 +804,7 @@ export default function AiPanel({
             ))}
           </div>
         </>
-      )}
+      ) : null}
 
       <div className="panel-section">
         <button className="primary-button full-width-button" type="button" onClick={generate} disabled={isGenerating}>
