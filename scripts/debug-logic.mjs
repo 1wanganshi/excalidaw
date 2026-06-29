@@ -1,6 +1,7 @@
 import { buildLogicManuscriptIR } from "../src/logic/buildIr.ts";
 import { sentenceText } from "../src/logic/splitSentences.ts";
 import { validateIrCoverage } from "../src/logic/validate.ts";
+import { irToPosterV2 } from "../src/logic/irToPosterV2.ts";
 
 const text = `孩子考试又考砸了，你第一反应是什么？报补习班，买练习题,每天盯着他多学两小时。但你有没有发现一个奇怪的现象：你越逼他学，他越学不进去？
 
@@ -49,4 +50,19 @@ for (const e of ir.edges) {
 console.log("\n--- Chains ---");
 for (const c of ir.chains) {
   console.log(`${c.kind}: ${c.sentenceIds.length} sentences`);
+}
+
+const doc = irToPosterV2(ir);
+console.log("\n--- PosterDocumentV2 (local fallback) ---");
+console.log("Title:", JSON.stringify(doc.title));
+console.log("Overview items:", JSON.stringify(doc.overview));
+console.log(`Sections: ${doc.sections.length}`);
+for (let i = 0; i < doc.sections.length; i++) {
+  const s = doc.sections[i];
+  console.log(`\n  [Section ${i}] label=${JSON.stringify(s.label)} | body patterns=${s.body.length}`);
+  for (let j = 0; j < s.body.length; j++) {
+    const p = s.body[j];
+    const refSummary = "refs" in p ? JSON.stringify(p.refs) : "title" in p ? JSON.stringify(p.title) : "";
+    console.log(`    (${j}) pattern=${p.pattern} ${refSummary}`);
+  }
 }

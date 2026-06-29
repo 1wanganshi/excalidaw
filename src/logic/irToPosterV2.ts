@@ -32,6 +32,20 @@ function isChainStart(ir: LogicManuscriptIR, sid: string): boolean {
   return ir.chains.some((c) => c.sentenceIds[0] === sid && c.sentenceIds.length > 1);
 }
 
+// 长句当 section 标题会换行成「另一段正文」，破坏视觉层级；
+// 这里给过长的 section 句生成 4-8 字短标签，原文仍作为正文保留。
+function shortSectionLabel(text: string): string {
+  const clean = text.replace(/[。！？；;]+$/, "").trim();
+  if (clean.length <= 16) return clean;
+  if (/^你会发现|^当我们不再|^当你不再/.test(clean)) return "结语";
+  if (/^因为分数|^因为真正|^本质/.test(clean)) return "本质回归";
+  if (/^试试这样做|^这样做|^实操/.test(clean)) return "落地做法";
+  if (/^道德经说|^道德经里|^老子说/.test(clean)) return "经典映照";
+  return clean.slice(0, 8);
+}
+
+const CONCLUSION_RE = /^你会发现|^因为分数的本质|^当我们不再|^当你不再|^因为真正的学习/;
+
 function splitPhases(ir: LogicManuscriptIR): Phase[] {
   const phases: Phase[] = [];
   const hook = buildHookBlock(ir.sentences, ir.normalized);
@@ -54,18 +68,25 @@ function splitPhases(ir: LogicManuscriptIR): Phase[] {
     if (s.role === "section") {
       const text = textOf(ir, s.id);
       if (majorSection.test(text)) {
-        if (current && current.sentenceIds.length > 0) phases.push(current);
-        current = {
-          label: text.replace(/[。！？；;]+$/, ""),
-          sentenceIds: [],
-        };
-        if (/你会发现|因为分数的本质|道德经说/.test(text)) {
+        const clean = text.replace(/[。！？；;]+$/, "").trim();
+        const isConclusion = CONCLUSION_RE.test(text);
+        const label = isConclusion ? "结语" : shortSectionLabel(text);
+        // 连续结语句合并到同一个「结语」段，不再每句开一个 section
+        if (isConclusion && current && current.label === "结语") {
           current.sentenceIds.push(s.id);
+          continue;
         }
+        if (current && current.sentenceIds.length > 0) phases.push(current);
+        // 标签被缩短时，原句必须进正文，否则丢字（保真）
+        const shortened = label !== clean;
+        current = {
+          label,
+          sentenceIds: shortened ? [s.id] : [],
+        };
       } else if (current) {
         current.sentenceIds.push(s.id);
       } else {
-        current = { label: text.replace(/[。！？；;]+$/, ""), sentenceIds: [] };
+        current = { label: shortSectionLabel(text), sentenceIds: [] };
       }
       continue;
     }
@@ -205,7 +226,22 @@ function buildPatternsForPhase(phase: Phase, ir: LogicManuscriptIR): SectionPatt
       continue;
     }
 
-    if (/^[^。]{2,28}[""][^""]{2,12}[""][。]?$/.test(text) || (s.role === "section" && text.length <= 36)) {
+    // section 句单独成块：短句当 highlight 强调，长句（>40）单独成带强调的正文段，
+    // 不能被吞进下面的 free_paragraph run（否则「道德经说…」「你会发现…」会埋进大段文字）。
+    if (s.role === "section") {
+      const stripped = text.replace(/[。]+$/, "");
+      if (stripped.length <= 40) {
+        patterns.push({ pattern: "highlight", text: stripped });
+      } else {
+        const emphasis = /越.*越|反而|不是.*而是|本质/.test(text) ? "red" : "normal";
+        patterns.push({ pattern: "free_paragraph", text: stripped, emphasis });
+      }
+      handled.add(sid);
+      i += 1;
+      continue;
+    }
+
+    if (/^[^。]{2,28}[""][^""]{2,12}[""][。]?$/.test(text)) {
       patterns.push({ pattern: "highlight", text: text.replace(/[。]+$/, "") });
       handled.add(sid);
       i += 1;
@@ -220,6 +256,8 @@ function buildPatternsForPhase(phase: Phase, ir: LogicManuscriptIR): SectionPatt
       const runS = ir.sentences.find((x) => x.id === runId)!;
       const runText = textOf(ir, runId);
       if (runS.role === "summary") break;
+      // section 句（如「道德经说…」）要单独成 highlight，不能被吞进正文 run
+      if (runS.role === "section") break;
       if (parseContrastParts(runText)?.wrong) break;
       if (parseFormulaChain(runText)?.length) break;
       run.push(runText);
@@ -249,13 +287,24 @@ function deriveTitle(ir: LogicManuscriptIR): string {
   return first ? textOf(ir, first.id).slice(0, 36) : "讲义长图";
 }
 
+// 从 step 的 rest 里抽 4 字关键词：
+// 优先取「变成/转为/→」之后的结果，否则去掉前导「把/将/让/使」再取首 4 字。
+// 修复「把"要我学"变成"我要学"」被切成「把要我学」这种半截词的问题。
+function stepKeyword(rest: string): string {
+  let r = rest.replace(/[""]/g, "").trim();
+  const after = r.split(/变成|转为|转化为|变为|→/).pop()?.trim();
+  if (after && after.length >= 2) r = after;
+  r = r.replace(/^[把将让使给]+/, "").trim();
+  r = r.replace(/[，,。：:].*$/, "").trim();
+  return r.slice(0, 4) || "步骤";
+}
+
 function deriveOverview(ir: LogicManuscriptIR): string[] | undefined {
   const steps = ir.chains.filter((c) => c.kind === "step_block");
   if (steps.length >= 3) {
     return steps.slice(0, 3).map((c) => {
       const { rest } = parseStepLabel(textOf(ir, c.sentenceIds[0]));
-      const kw = rest.replace(/[，,。：:].*$/, "").replace(/[""]/g, "").slice(0, 4);
-      return kw || "步骤";
+      return stepKeyword(rest);
     });
   }
   const keywords = ["认知负荷", "破局", "内驱力"].filter((kw) => ir.normalized.includes(kw));
