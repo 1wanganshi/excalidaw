@@ -518,14 +518,23 @@ export default function AiPanel({
           <div className="panel-section">
             <label>
               设计主题
-              <select value={posterTheme} onChange={(event) => setPosterTheme(event.target.value as PosterTheme)}>
-                {POSTER_THEME_ORDER.map((id) => (
-                  <option key={id} value={id}>
-                    {POSTER_THEMES[id].label} · {POSTER_THEMES[id].description}
-                  </option>
-                ))}
-              </select>
             </label>
+            <div className="theme-cards">
+              {POSTER_THEME_ORDER.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={posterTheme === id ? "theme-card active" : "theme-card"}
+                  onClick={() => setPosterTheme(id)}
+                >
+                  <span className="theme-card-swatch" style={{ background: POSTER_THEMES[id].paper, borderColor: POSTER_THEMES[id].red }} />
+                  <span className="theme-card-info">
+                    <span className="theme-card-name">{POSTER_THEMES[id].label}</span>
+                    <span className="theme-card-desc">{POSTER_THEMES[id].description}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
           <div className="panel-section">
             <label>

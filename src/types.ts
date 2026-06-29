@@ -22,7 +22,7 @@ export type PromptPreset = {
   prompt: string;
 };
 
-export type PosterTheme = "whiteboard";
+export type PosterTheme = "whiteboard" | "magazine" | "blackboard" | "minimal";
 
 // ============================================================
 // Semantic analysis types (for two-phase diagram generation)
