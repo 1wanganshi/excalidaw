@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { createDefaultPrompt, getNextPromptName } from "./storage";
 import { POSTER_THEME_ORDER, POSTER_THEMES } from "./poster/themes";
-import { diffSummary, type CharDiff } from "./poster/validate";
 import {
   generateImagePrompt,
   splitContentIntoFourParts,
@@ -16,12 +15,11 @@ import type {
   ImageAspectRatio,
   ImageResolution,
   InsertedAiImage,
-  PosterDocument,
   PosterTheme,
   PromptPreset,
 } from "./types";
 
-type AiMode = "image" | "diagram" | "manuscript" | "logic";
+type AiMode = "image" | "logic" | "manuscript";
 
 type ManuscriptItem = {
   index: 0 | 1 | 2 | 3;
@@ -31,13 +29,6 @@ type ManuscriptItem = {
   elementId?: string;
   status: ManuscriptItemStatus;
   error?: string;
-};
-
-type PosterGenerateRequest = {
-  model: AiModelConfig;
-  original: string;
-  intent: string;
-  theme: PosterTheme;
 };
 
 type LogicGenerateRequest = {
@@ -53,17 +44,6 @@ type AiPanelProps = {
   settings: AiSettings;
   onSettingsChange: (settings: AiSettings) => void;
   onGenerateImage: (request: AiImageRequest, onProgress: (message: string) => void) => Promise<AiImageResult>;
-  onGenerateDiagram: (
-    request: PosterGenerateRequest,
-    onProgress: (message: string) => void,
-    onNeedRepair: (doc: PosterDocument, diff: CharDiff) => void,
-  ) => Promise<void>;
-  onAcceptRepair: (
-    doc: PosterDocument,
-    theme: PosterTheme,
-    original: string,
-    onProgress: (message: string) => void,
-  ) => Promise<void>;
   onGenerateLogic: (
     request: LogicGenerateRequest,
     onProgress: (message: string) => void,
@@ -105,8 +85,6 @@ export default function AiPanel({
   settings,
   onSettingsChange,
   onGenerateImage,
-  onGenerateDiagram,
-  onAcceptRepair,
   onGenerateLogic,
   onInsertImage,
   onInsertImages,
@@ -117,18 +95,10 @@ export default function AiPanel({
   const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>("1:1");
   const [imageResolution, setImageResolution] = useState<ImageResolution>("1k");
   const [posterTheme, setPosterTheme] = useState<PosterTheme>("whiteboard");
-  const [posterOriginal, setPosterOriginal] = useState("");
-  const [posterIntent, setPosterIntent] = useState("");
   const [logicOriginal, setLogicOriginal] = useState("");
   const [logicExport, setLogicExport] = useState<LogicExportMode>("lecture");
   const [logicUseAi, setLogicUseAi] = useState(true);
   const [logicIntent, setLogicIntent] = useState("");
-  const [pendingRepair, setPendingRepair] = useState<{
-    doc: PosterDocument;
-    diff: CharDiff;
-    original: string;
-    theme: PosterTheme;
-  } | null>(null);
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [editingText, setEditingText] = useState("");
@@ -212,20 +182,14 @@ export default function AiPanel({
   const generate = async () => {
     const selectedModel = mode === "image" || mode === "manuscript" ? selectedImageModel : selectedLanguageModel;
     const imagePromptText = imagePrompt.trim();
-    const originalText = posterOriginal;
 
     if (mode !== "logic" && !selectedModel) {
-      appendProgress(mode === "diagram" ? "请先在设置中新增语言大模型。" : "请先在设置中新增生图大模型。");
+      appendProgress("请先在设置中新增生图大模型。");
       return;
     }
 
     if (mode === "image" && !imagePromptText) {
       appendProgress("请先填写图片提示词。");
-      return;
-    }
-
-    if (mode === "diagram" && !originalText.trim()) {
-      appendProgress("请先粘贴内容原文。");
       return;
     }
 
@@ -247,7 +211,6 @@ export default function AiPanel({
     setIsGenerating(true);
     setProgress([]);
     setLastImageResult(null);
-    setPendingRepair(null);
     if (mode === "manuscript") {
       setManuscriptItems([]);
       setActiveManuscriptIndex(null);
@@ -257,9 +220,7 @@ export default function AiPanel({
         ? "准备四张手稿图生成..."
         : mode === "image"
           ? "准备图片生成请求..."
-          : mode === "logic"
-            ? "准备手稿逻辑绘图（本地，无需模型）..."
-            : "准备图表生成请求...",
+          : "准备白板长图生成...",
     );
 
     try {
@@ -291,20 +252,6 @@ export default function AiPanel({
             intent: logicIntent,
           },
           appendProgress,
-        );
-      } else {
-        appendProgress(`已选择主题：${POSTER_THEMES[posterTheme].label}。`);
-        await onGenerateDiagram(
-          {
-            model: selectedModel,
-            original: originalText,
-            intent: posterIntent,
-            theme: posterTheme,
-          },
-          appendProgress,
-          (doc, diff) => {
-            setPendingRepair({ doc, diff, original: originalText, theme: posterTheme });
-          },
         );
       }
     } catch (error) {
@@ -442,36 +389,14 @@ export default function AiPanel({
   const hasManuscriptFailure = manuscriptItems.some((item) => item.status === "error");
   const manuscriptInsertedCount = manuscriptItems.filter((item) => !!item.elementId).length;
 
-  const handleAcceptRepair = async () => {
-    if (!pendingRepair) return;
-    setIsGenerating(true);
-    try {
-      appendProgress("接受人工补救：本地强制按原文修复并渲染...");
-      await onAcceptRepair(pendingRepair.doc, pendingRepair.theme, pendingRepair.original, appendProgress);
-      setPendingRepair(null);
-    } catch (error) {
-      appendProgress(error instanceof Error ? error.message : "本地修复失败。");
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleCancelRepair = () => {
-    setPendingRepair(null);
-    appendProgress("已取消本次生成。");
-  };
-
   return (
     <aside className="ai-panel">
-      <div className="segmented panel-mode panel-mode-four">
+      <div className="segmented panel-mode panel-mode-three">
         <button className={mode === "image" ? "active" : ""} type="button" onClick={() => setMode("image")}>
           AI生图
         </button>
-        <button className={mode === "diagram" ? "active" : ""} type="button" onClick={() => setMode("diagram")}>
-          AI白板长图
-        </button>
         <button className={mode === "logic" ? "active" : ""} type="button" onClick={() => setMode("logic")}>
-          手稿绘图
+          白板长图
         </button>
         <button className={mode === "manuscript" ? "active" : ""} type="button" onClick={() => setMode("manuscript")}>
           四张手稿图
@@ -511,23 +436,19 @@ export default function AiPanel({
       ) : (
         <div className="panel-section">
           <label>
-            {mode === "diagram" ? "语言模型" : "生图模型"}
+            生图模型
             <select
-              value={(mode === "diagram" ? selectedLanguageModel?.id : selectedImageModel?.id) ?? ""}
+              value={selectedImageModel?.id ?? ""}
               onChange={(event) =>
-                updateSettings(
-                  mode === "diagram"
-                    ? { ...settings, selectedLanguageModelId: event.target.value }
-                    : { ...settings, selectedImageModelId: event.target.value },
-                )
+                updateSettings({ ...settings, selectedImageModelId: event.target.value })
               }
             >
-              {(mode === "diagram" ? settings.languageModels : settings.imageModels).length === 0 ? (
+              {settings.imageModels.length === 0 ? (
                 <option value="">未配置</option>
               ) : null}
-              {(mode === "diagram" ? settings.languageModels : settings.imageModels).map((model, index) => (
+              {settings.imageModels.map((model, index) => (
                 <option key={model.id} value={model.id}>
-                  {model.name || `${mode === "diagram" ? "语言模型" : "生图模型"}${index + 1}`}
+                  {model.name || `生图模型${index + 1}`}
                 </option>
               ))}
             </select>
@@ -583,61 +504,7 @@ export default function AiPanel({
         </>
       ) : null}
 
-      {mode === "diagram" ? (
-        <>
-          <div className="panel-section">
-            <label>
-              设计主题
-              <select value={posterTheme} onChange={(event) => setPosterTheme(event.target.value as PosterTheme)}>
-                {POSTER_THEME_ORDER.map((id) => (
-                  <option key={id} value={id}>
-                    {POSTER_THEMES[id].label} · {POSTER_THEMES[id].description}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          <div className="panel-section">
-            <label>
-              内容原文
-              <textarea
-                value={posterOriginal}
-                placeholder="把整篇文章粘进来。系统会自动识别段落、对错对比、公式步骤、案例、列表、总结，排成一张「白板讲解型」竖版长图，原文一字不删。"
-                onChange={(event) => setPosterOriginal(event.target.value)}
-                rows={12}
-              />
-            </label>
-          </div>
-
-          <div className="panel-section">
-            <label>
-              意图提示（可选）
-              <textarea
-                value={posterIntent}
-                placeholder="例如：第二段重点圈出来 / 把流程用公式框 / 末尾加总结框。仅影响模块识别。"
-                onChange={(event) => setPosterIntent(event.target.value)}
-                rows={3}
-              />
-            </label>
-          </div>
-
-          {pendingRepair ? (
-            <div className="panel-section progress-box">
-              <h3>原文校验未通过，请选择补救方式</h3>
-              <p style={{ wordBreak: "break-all" }}>{diffSummary(pendingRepair.diff)}</p>
-              <div className="prompt-actions">
-                <button type="button" onClick={handleAcceptRepair} disabled={isGenerating}>
-                  强制只用原文（推荐）
-                </button>
-                <button type="button" onClick={handleCancelRepair} disabled={isGenerating}>
-                  取消
-                </button>
-              </div>
-            </div>
-          ) : null}
-        </>
-      ) : mode === "manuscript" ? (
+      {mode === "manuscript" ? (
         <>
           <div className="panel-section">
             <label>
@@ -813,12 +680,10 @@ export default function AiPanel({
             : mode === "image"
               ? "生成图片"
               : mode === "manuscript"
-              ? "生成四张手稿图"
-              : mode === "logic"
-                ? logicExport === "lecture"
+                ? "生成四张手稿图"
+                : logicExport === "lecture"
                   ? "生成讲义长图"
-                  : "生成逻辑导图"
-                : "生成白板长图"}
+                  : "生成逻辑导图"}
         </button>
       </div>
 
@@ -828,9 +693,7 @@ export default function AiPanel({
             ? "图片生成进度"
             : mode === "manuscript"
               ? "四张手稿图生成进度"
-              : mode === "logic"
-                ? "手稿绘图进度"
-                : "白板长图生成进度"}
+              : "白板长图生成进度"}
         </h3>
         {progress.length === 0 ? <p>等待开始。</p> : progress.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}
       </div>

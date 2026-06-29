@@ -1,0 +1,33 @@
+{
+  "api": {
+    "base_url": "https://www.geeknow.top/v1",
+    "api_key": "请在运行前填入你的 key",
+    "model": "gpt-image-2"
+  },
+  "output_dir": "C:/Users/Lenovo/Desktop/电商批量生图输出/2026-04-23_153000",
+  "reference_images": [
+    "C:/path/to/reference1.png"
+  ],
+  "product": {
+    "name": "示例产品",
+    "category": "护肤品",
+    "selling_points": ["补水", "修护", "高级质感"],
+    "target_users": "25-35 岁女性",
+    "price_band": "中高端",
+    "channels": ["淘宝主图", "详情页", "小红书"],
+    "style": "清透极简 + 专业质感"
+  },
+  "mode": "标准版",
+  "jobs": [
+    {
+      "name": "正面主图",
+      "file_name": "01_正面主图.png",
+      "prompt": "这里替换成最终长 prompt",
+      "size": "1024x1024",
+      "background": "auto",
+      "quality": "high",
+      "orientation": "square",
+      "use_reference": true
+    }
+  ]
+}

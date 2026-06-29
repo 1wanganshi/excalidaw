@@ -1304,8 +1304,6 @@ export default function App() {
             settings={aiSettings}
             onSettingsChange={updateAiSettings}
             onGenerateImage={generateAiImage}
-            onGenerateDiagram={generateAiDiagram}
-            onAcceptRepair={acceptPosterRepair}
             onGenerateLogic={generateLogicManuscript}
             onInsertImage={insertAiImage}
             onInsertImages={insertAiImages}
