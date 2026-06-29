@@ -58,7 +58,9 @@ function splitIntoSentences(text: string): string[] {
     .filter(Boolean);
 }
 
-/** 贪心：尽量把每段总长压在 totalLen/4 附近，且不切断单元。 */
+/** 贪心：尽量把每段总长压在 totalLen/4 附近，且不切断单元。
+ *  关键约束：避免"最后一段虚胖" —— 当当前桶装到 target 附近时，如果"剩余字/剩余桶"
+ *  仍显著大于 target（>1.35x），说明后面会被堆爆，主动多吞一个 unit，把负担前移。 */
 function distributeUnitsIntoFour(units: string[]): string[] {
   if (units.length === 0) {
     return ["", "", "", ""];
@@ -66,27 +68,35 @@ function distributeUnitsIntoFour(units: string[]): string[] {
 
   const totalLen = units.reduce((sum, unit) => sum + unit.length, 0);
   const target = Math.max(1, Math.ceil(totalLen / 4));
+  const OVERFLOW_TOLERANCE = 1.35; // 允许当前桶超出 target 多少倍，以减轻后续桶负担
   const parts: string[] = [];
   let current = "";
+  let consumedLen = 0;
 
   for (let i = 0; i < units.length; i += 1) {
     const unit = units[i];
     const remainingUnits = units.length - i;
     const remainingParts = 4 - parts.length;
+    const remainingLenAfterThis = totalLen - consumedLen - unit.length;
+    const bucketsLeftIfClose = remainingParts - 1;
+    // 如果现在关桶，后面的平均每桶要装多少？
+    const avgIfClose = bucketsLeftIfClose > 0 ? remainingLenAfterThis / bucketsLeftIfClose : 0;
 
-    // 保证每个剩余 part 都至少能领到一个 unit
-    const mustCloseCurrent =
+    const overTarget = current.length > 0 && current.length + unit.length > target;
+    const lastBucketWouldBloat = overTarget && avgIfClose > target * OVERFLOW_TOLERANCE;
+    const mustClose =
       parts.length < 3 &&
       current.length > 0 &&
-      (current.length + unit.length > target ||
-        remainingUnits <= remainingParts - 1);
+      (overTarget || remainingUnits <= remainingParts - 1) &&
+      !lastBucketWouldBloat;
 
-    if (mustCloseCurrent) {
+    if (mustClose) {
       parts.push(current);
       current = unit;
     } else {
       current = current ? `${current}\n\n${unit}` : unit;
     }
+    consumedLen += unit.length;
   }
 
   if (current) {
@@ -200,7 +210,7 @@ const MANUSCRIPT_STYLE_HINTS = [
 export function generateImagePrompt(partText: string, index: number): string {
   const style = MANUSCRIPT_STYLE_HINTS[index] ?? MANUSCRIPT_STYLE_HINTS[0];
 
-  return `请生成一张9:16竖版手稿风格图片，白色纸张背景，黑色手写字体，排版清晰，${style}重点句可以用红色手写下划线、红色圈注或红色方框强调。
+  return `请生成一张9:16竖版手稿风格图片，背景必须是纯白色 #FFFFFF（与白色画布完全一致），没有任何纸张纹理、米色/奶白色底、边框、外框线、四角阴影、装饰花边或暗角，整张图四周直接是纯白底色，方便贴到白色白板上无缝衔接；黑色手写字体，排版清晰，${style}重点句可以用红色手写下划线、红色圈注或红色方框强调。
 
 要求：以下文字必须全部、逐字、完整出现在图片中，不能删减，不能改写，不能遗漏任何标点。请优先保证文字完整和清晰可读，插图只能作为辅助，不能遮挡文字。
 

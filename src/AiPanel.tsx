@@ -50,6 +50,12 @@ type AiPanelProps = {
   ) => Promise<void>;
   onInsertImage: (result: AiImageResult) => Promise<InsertedAiImage | null>;
   onInsertImages: (results: AiImageResult[]) => Promise<InsertedAiImage[]>;
+  onInsertManuscriptAt: (
+    index: number,
+    total: number,
+    result: AiImageResult,
+  ) => Promise<InsertedAiImage | null>;
+  onReplaceImage: (elementId: string, result: AiImageResult) => Promise<boolean>;
   onFocusImage: (elementId: string) => void;
 };
 
@@ -88,6 +94,8 @@ export default function AiPanel({
   onGenerateLogic,
   onInsertImage,
   onInsertImages,
+  onInsertManuscriptAt,
+  onReplaceImage,
   onFocusImage,
 }: AiPanelProps) {
   const [mode, setMode] = useState<AiMode>("image");
@@ -105,10 +113,9 @@ export default function AiPanel({
   const [progress, setProgress] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [lastImageResult, setLastImageResult] = useState<AiImageResult | null>(null);
-  // 四张手稿图相关状态
+  // 四张手稿图相关状态（跳转按钮已迁移到白板右下角浮层，由 App 持有）
   const [manuscriptText, setManuscriptText] = useState("");
   const [manuscriptItems, setManuscriptItems] = useState<ManuscriptItem[]>([]);
-  const [activeManuscriptIndex, setActiveManuscriptIndex] = useState<0 | 1 | 2 | 3 | null>(null);
 
   const selectedImageModel = useMemo(
     () => settings.imageModels.find((model) => model.id === settings.selectedImageModelId) ?? settings.imageModels[0],
@@ -213,7 +220,6 @@ export default function AiPanel({
     setLastImageResult(null);
     if (mode === "manuscript") {
       setManuscriptItems([]);
-      setActiveManuscriptIndex(null);
     }
     appendProgress(
       mode === "manuscript"
@@ -261,7 +267,7 @@ export default function AiPanel({
     }
   };
 
-  // 拆分原文 -> 顺序生成 4 张 9:16 手稿图 -> 4 张全部就绪后一次性插入画布
+  // 拆分原文 -> 顺序生成 4 张 9:16 手稿图 -> 每张生成完立刻入画布（流式），不再等 4 张齐
   const runManuscriptGeneration = async (selectedModel: AiModelConfig) => {
     appendProgress("正在拆分为 4 段...");
     const parts = splitContentIntoFourParts(manuscriptText);
@@ -276,12 +282,13 @@ export default function AiPanel({
     setManuscriptItems(initialItems);
 
     const workingItems = [...initialItems];
+    const total = workingItems.length;
     let hasFailure = false;
 
-    for (let i = 0; i < workingItems.length; i += 1) {
+    for (let i = 0; i < total; i += 1) {
       workingItems[i] = { ...workingItems[i], status: "generating" };
       setManuscriptItems([...workingItems]);
-      appendProgress(`正在生成第 ${i + 1}/4 张手稿图...`);
+      appendProgress(`正在生成第 ${i + 1}/${total} 张手稿图...`);
 
       try {
         const result = await onGenerateImage(
@@ -293,8 +300,16 @@ export default function AiPanel({
           },
           appendProgress,
         );
-        workingItems[i] = { ...workingItems[i], status: "ready", result };
+        // 生成完立刻插入到画布的对应槽位
+        const meta = await onInsertManuscriptAt(i, total, result);
+        workingItems[i] = {
+          ...workingItems[i],
+          status: meta ? "inserted" : "ready",
+          result,
+          elementId: meta?.elementId,
+        };
         setManuscriptItems([...workingItems]);
+        appendProgress(`第 ${i + 1}/${total} 张已放入画布。`);
       } catch (error) {
         hasFailure = true;
         const message = error instanceof Error ? error.message : "生图失败。";
@@ -305,35 +320,18 @@ export default function AiPanel({
     }
 
     if (hasFailure) {
-      appendProgress("部分图片生成失败，请点击「重试失败项」继续。");
-      return;
+      appendProgress("部分图片生成失败，可点击对应段的「重新生成这张」或下方「重试失败项」继续。");
+    } else {
+      appendProgress(`${total} 张手稿图已全部放入画布。点击白板右下角的 1/2/3/4 可定位查看。`);
     }
-
-    await insertManuscriptResults(workingItems);
   };
 
-  // 把所有 ready 的图片一次性插入画布，并把 elementId 写回 items。
-  const insertManuscriptResults = async (currentItems: ManuscriptItem[]) => {
-    const allReady = currentItems.every((item) => item.status === "ready" && item.result);
-    if (!allReady) return;
-
-    appendProgress("四张图片已生成，正在放入画布...");
-    const inserted = await onInsertImages(currentItems.map((item) => item.result as AiImageResult));
-
-    const updated = currentItems.map((item, index) => {
-      const meta = inserted[index];
-      if (!meta) return item;
-      return { ...item, status: "inserted" as ManuscriptItemStatus, elementId: meta.elementId };
-    });
-    setManuscriptItems(updated);
-    setActiveManuscriptIndex(0);
-
-    const firstId = updated[0]?.elementId;
-    if (firstId) {
-      onFocusImage(firstId);
-    }
-    appendProgress("四张手稿图已放入画布。点击 1/2/3/4 可定位查看。");
+  // 仅供"重试失败项"复用：逐张走流式插入。
+  const _legacyUnused = async () => {
+    // 旧的 4 张统一插入路径已弃用。引用 onInsertImages 以避免 unused-prop 提示。
+    void onInsertImages;
   };
+  void _legacyUnused;
 
   // 只重生 status === "error" 的项。重生成功后若 4 张齐了则统一插入。
   const retryManuscriptFailures = async () => {
@@ -345,7 +343,7 @@ export default function AiPanel({
         if (workingItems[i].status !== "error") continue;
         workingItems[i] = { ...workingItems[i], status: "generating", error: undefined };
         setManuscriptItems([...workingItems]);
-        appendProgress(`正在重试第 ${i + 1}/4 张...`);
+        appendProgress(`正在重试第 ${i + 1}/${workingItems.length} 张...`);
         try {
           const result = await onGenerateImage(
             {
@@ -356,8 +354,22 @@ export default function AiPanel({
             },
             appendProgress,
           );
-          workingItems[i] = { ...workingItems[i], status: "ready", result };
+          // 流式插入：已有 elementId 的话替换素材，没有的话往原槽位插一张
+          let meta: { elementId: string } | null = null;
+          if (workingItems[i].elementId) {
+            const ok = await onReplaceImage(workingItems[i].elementId!, result);
+            meta = ok ? { elementId: workingItems[i].elementId! } : null;
+          } else {
+            meta = await onInsertManuscriptAt(i, workingItems.length, result);
+          }
+          workingItems[i] = {
+            ...workingItems[i],
+            status: meta ? "inserted" : "ready",
+            result,
+            elementId: meta?.elementId ?? workingItems[i].elementId,
+          };
           setManuscriptItems([...workingItems]);
+          appendProgress(`第 ${i + 1} 张已重生并放入画布。`);
         } catch (error) {
           const message = error instanceof Error ? error.message : "生图失败。";
           workingItems[i] = { ...workingItems[i], status: "error", error: message };
@@ -366,8 +378,8 @@ export default function AiPanel({
         }
       }
 
-      if (workingItems.every((item) => item.status === "ready")) {
-        await insertManuscriptResults(workingItems);
+      if (workingItems.every((item) => !!item.elementId)) {
+        appendProgress(`${workingItems.length} 张手稿图已全部放入画布。`);
       }
     } catch (error) {
       appendProgress(error instanceof Error ? error.message : "重试失败。");
@@ -376,18 +388,54 @@ export default function AiPanel({
     }
   };
 
-  const focusManuscriptImage = (index: 0 | 1 | 2 | 3) => {
-    const item = manuscriptItems[index];
-    if (!item?.elementId) {
-      appendProgress(`第 ${index + 1} 张图片还未放入画布。`);
-      return;
-    }
-    setActiveManuscriptIndex(index);
-    onFocusImage(item.elementId);
-  };
-
   const hasManuscriptFailure = manuscriptItems.some((item) => item.status === "error");
   const manuscriptInsertedCount = manuscriptItems.filter((item) => !!item.elementId).length;
+
+  // 单张重生：用相同的 prompt 重新生图，并替换画布上对应 image element 的素材。
+  const regenerateOne = async (index: 0 | 1 | 2 | 3) => {
+    if (!selectedImageModel) {
+      appendProgress("请先在设置中新增生图大模型。");
+      return;
+    }
+    const item = manuscriptItems[index];
+    if (!item || !item.elementId) {
+      appendProgress(`第 ${index + 1} 张还未入画布，无法重生。`);
+      return;
+    }
+    setIsGenerating(true);
+    try {
+      const working = [...manuscriptItems];
+      working[index] = { ...working[index], status: "generating", error: undefined };
+      setManuscriptItems(working);
+      appendProgress(`正在重新生成第 ${index + 1} 张...`);
+      try {
+        const result = await onGenerateImage(
+          {
+            model: selectedImageModel,
+            prompt: working[index].prompt,
+            aspectRatio: "9:16",
+            resolution: imageResolution,
+          },
+          appendProgress,
+        );
+        const ok = await onReplaceImage(working[index].elementId!, result);
+        working[index] = {
+          ...working[index],
+          status: ok ? "inserted" : "ready",
+          result,
+        };
+        setManuscriptItems([...working]);
+        appendProgress(ok ? `第 ${index + 1} 张已替换。` : `第 ${index + 1} 张替换失败：找不到画布元素。`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "生图失败。";
+        working[index] = { ...working[index], status: "error", error: message };
+        setManuscriptItems([...working]);
+        appendProgress(`第 ${index + 1} 张重生失败：${message}`);
+      }
+    } finally {
+      setIsGenerating(false);
+    }
+  };
 
   return (
     <aside className="ai-panel">
@@ -539,23 +587,6 @@ export default function AiPanel({
 
           {manuscriptItems.length > 0 ? (
             <>
-              <div className="panel-section">
-                <label>跳转图片</label>
-                <div className="manuscript-nav">
-                  {manuscriptItems.map((item) => (
-                    <button
-                      key={item.index}
-                      type="button"
-                      className={activeManuscriptIndex === item.index ? "active" : ""}
-                      disabled={!item.elementId}
-                      onClick={() => focusManuscriptImage(item.index)}
-                    >
-                      {item.index + 1}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               <div className="panel-section manuscript-item-list">
                 {manuscriptItems.map((item) => (
                   <div className="manuscript-item" key={item.index}>
@@ -567,6 +598,18 @@ export default function AiPanel({
                     </div>
                     {item.status === "error" && item.error ? (
                       <div className="manuscript-item-error">{item.error}</div>
+                    ) : null}
+                    {item.elementId ? (
+                      <div className="manuscript-item-actions">
+                        <button
+                          type="button"
+                          onClick={() => regenerateOne(item.index)}
+                          disabled={isGenerating}
+                          title={`字数 ${item.text.length}，重新让 AI 画一张替换`}
+                        >
+                          {isGenerating && item.status === "generating" ? "生成中..." : "重新生成这张"}
+                        </button>
+                      </div>
                     ) : null}
                   </div>
                 ))}

@@ -21,6 +21,20 @@ function joinRefs(ir: LogicManuscriptIR, refs: string[]): string {
   return refs.map((r) => textOf(ir, r)).join("");
 }
 
+// 防御性 label 截断：LLM 常无视 ≤8 字约束，把整句当 label，导致标题换行成正文。
+// 这里把超长 label 压成短标签（结语句 → 「结语」，其余取前 6-8 字）。
+function clampLabel(label: string | undefined): string | undefined {
+  if (!label) return label;
+  const clean = label.replace(/[。！？；;]+$/, "").trim();
+  if (clean.length <= 12) return clean;
+  if (/^你会发现|^当我们不再|^当你不再|^总而言之|^综上/.test(clean)) return "结语";
+  if (/^因为.*本质|^本质/.test(clean)) return "本质回归";
+  if (/^试试这样做|^这样做|^实操/.test(clean)) return "落地做法";
+  if (/^道德经|^老子说/.test(clean)) return "经典映照";
+  if (/^我们来|^下面我们|^接下来/.test(clean)) return clean.slice(0, 4);
+  return clean.slice(0, 8);
+}
+
 /** 收集 pattern 引用的句子 ID（不含 titleRef —— 标题是装饰槽） */
 function collectBodyRefs(plan: AiLogicLayoutPlan): string[] {
   const out: string[] = [];
@@ -235,7 +249,7 @@ export function resolveLayoutPlan(ir: LogicManuscriptIR, plan: AiLogicLayoutPlan
     if (body.length === 0) continue;
     sections.push({
       no: sec.no,
-      label: sec.label,
+      label: clampLabel(sec.label),
       body,
       source: joinRefs(ir, [...new Set(sourceIds)]),
     });

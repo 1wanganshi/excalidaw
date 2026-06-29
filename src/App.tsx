@@ -412,6 +412,13 @@ export default function App() {
   const [isAiPanelOpen, setIsAiPanelOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  // 四张手稿图：插入到画布后保留每张图的 elementId，用于在白板右下角浮层做 1/2/3/4 跳转。
+  const [manuscriptElementIds, setManuscriptElementIds] = useState<string[]>([]);
+  const [activeManuscriptIndex, setActiveManuscriptIndex] = useState<number | null>(null);
+  // 四张手稿图"流式入画布"模式下，4 张图的槽位（位置/尺寸）在第一张到达时计算并锁定，
+  // 后续 2/3/4 张沿用同一份 slot，避免视口变化导致排版错位。
+  type ManuscriptSlot = { x: number; y: number; w: number; h: number };
+  const manuscriptSlotsRef = useRef<ManuscriptSlot[] | null>(null);
   const [aiSettings, setAiSettings] = useState<AiSettings>(() => loadAiSettings());
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>(() => loadHistoryEntries());
 
@@ -1164,8 +1171,10 @@ export default function App() {
     };
   }, [persistDirty, saveSnapshotToHistory]);
 
-  // 四张手稿图模式：一次性把 4 张 9:16 图片横向插入画布。
-  // 与 insertAiImage 不同的是：固定尺寸 405x720，统一 addFiles/updateScene/历史快照一次，避免 4 次跳屏。
+  // 四张手稿图模式：把 4 张 9:16 图片横向插入画布。
+  // 关键：用与单图 insertAiImage 一致的逐张提交路径（每张都 addFiles + updateScene + 等一帧），
+  // 因为之前发现批量 addFiles 后立刻 updateScene 会出现 fileId 还没注册完就渲染、显示破图占位的问题。
+  // 尺寸按"当前可视区的 90%"动态计算 —— 4 张 9:16 横向排开 + 间隙，整体限制在视口 90% 内并居中。
   const insertAiImages = useCallback(async (results: AiImageResult[]): Promise<InsertedAiImage[]> => {
     const api = excalidrawAPIRef.current;
 
@@ -1173,68 +1182,286 @@ export default function App() {
       return [];
     }
 
-    const MANUSCRIPT_WIDTH = 405;
-    const MANUSCRIPT_HEIGHT = 720;
-    const GAP = 48;
+    const initialAppState = api.getAppState();
+    const zoom = initialAppState.zoom?.value ?? 1;
+    // 视口大小 → 场景坐标
+    const viewW = initialAppState.width / zoom;
+    const viewH = initialAppState.height / zoom;
 
-    const appState = api.getAppState();
-    const startX = -appState.scrollX + 80;
-    const startY = -appState.scrollY + 80;
+    // 总占用宽 / 高都不超过视口 96%。每张图保持 9:16。
+    const GAP = Math.max(8, viewW * 0.01);
+    const targetW = viewW * 0.96;
+    const targetH = viewH * 0.96;
 
+    // 先按"高度撑满 96%"算单图宽（9:16 → w = h * 9/16），若 4 张总宽超出 96% 再按宽度反推。
+    let imgH = targetH;
+    let imgW = (imgH * 9) / 16;
+    const totalW = imgW * 4 + GAP * 3;
+    if (totalW > targetW) {
+      imgW = (targetW - GAP * 3) / 4;
+      imgH = (imgW * 16) / 9;
+    }
+
+    const groupWidth = imgW * 4 + GAP * 3;
+    // 居中放在当前视口里（按初始 scroll 计算，逐张插入时不再使用滚动后的 appState 避免漂移）
+    const startX = -initialAppState.scrollX + (viewW - groupWidth) / 2;
+    const startY = -initialAppState.scrollY + (viewH - imgH) / 2;
+
+    const insertedMeta: InsertedAiImage[] = [];
+    const insertedElementIds: string[] = [];
+
+    for (let i = 0; i < results.length; i += 1) {
+      const result = results[i];
+      const fileId = `ai_${Date.now().toString(36)}_${i}` as FileId;
+      const now = Date.now();
+      const file: BinaryFileData = {
+        id: fileId,
+        mimeType: result.mimeType as BinaryFileData["mimeType"],
+        dataURL: result.dataUrl as BinaryFileData["dataURL"],
+        created: now,
+        lastRetrieved: now,
+      };
+
+      api.addFiles([file]);
+
+      const x = startX + i * (imgW + GAP);
+      const y = startY;
+
+      const [imageElement] = convertToExcalidrawElements(
+        [
+          {
+            type: "image",
+            x,
+            y,
+            width: imgW,
+            height: imgH,
+            fileId,
+            status: "saved",
+          },
+        ],
+        { regenerateIds: true },
+      );
+
+      const nextElements = [...api.getSceneElementsIncludingDeleted(), imageElement];
+      api.updateScene({
+        elements: nextElements,
+        captureUpdate: "IMMEDIATELY",
+      });
+
+      // 关键：让 Excalidraw 内部把 file 数据真正挂到 image element 上，避免破图占位
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+      insertedMeta.push({
+        elementId: imageElement.id,
+        fileId,
+        x,
+        y,
+        width: imgW,
+        height: imgH,
+      });
+      insertedElementIds.push(imageElement.id);
+    }
+
+    // 4 张全部就位后，统一存历史 + 滚动到整组中央
+    const allInserted = api.getSceneElementsIncludingDeleted();
+    const newImageElements = allInserted.filter((el) => insertedElementIds.includes(el.id));
+    api.scrollToContent(newImageElements, { fitToContent: true });
+
+    saveSnapshotToHistory(
+      {
+        elements: allInserted,
+        appState: sanitizeAppState(api.getAppState()),
+        files: snapshotRef.current.files,
+      },
+      "生成四张手稿图",
+    );
+    persistDirty(true);
+
+    // 同步白板右下角的跳转浮层
+    setManuscriptElementIds(insertedElementIds);
+    setActiveManuscriptIndex(0);
+
+    return insertedMeta;
+  }, [persistDirty, saveSnapshotToHistory]);
+
+  // 流式入画布：第 index 张图就绪时立刻插入，不必等 4 张全齐。
+  // 第一次调用（index===0 或 ref 为空）时按当前视口算好全部 total 张的槽位并锁定，
+  // 后续 2/3/4… 复用同一份 slot 不再重算，避免视口变化导致错位。
+  const insertManuscriptAt = useCallback(async (
+    index: number,
+    total: number,
+    result: AiImageResult,
+  ): Promise<InsertedAiImage | null> => {
+    const api = excalidrawAPIRef.current;
+    if (!api) return null;
+
+    // 计算/复用槽位
+    let slots = manuscriptSlotsRef.current;
+    if (!slots || slots.length !== total || index === 0) {
+      const appState = api.getAppState();
+      const zoom = appState.zoom?.value ?? 1;
+      const viewW = appState.width / zoom;
+      const viewH = appState.height / zoom;
+
+      const GAP = Math.max(8, viewW * 0.01);
+      const targetW = viewW * 0.96;
+      const targetH = viewH * 0.96;
+
+      let imgH = targetH;
+      let imgW = (imgH * 9) / 16;
+      const totalW = imgW * total + GAP * (total - 1);
+      if (totalW > targetW) {
+        imgW = (targetW - GAP * (total - 1)) / total;
+        imgH = (imgW * 16) / 9;
+      }
+
+      const groupWidth = imgW * total + GAP * (total - 1);
+      const startX = -appState.scrollX + (viewW - groupWidth) / 2;
+      const startY = -appState.scrollY + (viewH - imgH) / 2;
+
+      slots = Array.from({ length: total }, (_, i) => ({
+        x: startX + i * (imgW + GAP),
+        y: startY,
+        w: imgW,
+        h: imgH,
+      }));
+      manuscriptSlotsRef.current = slots;
+    }
+
+    const slot = slots[index];
+    if (!slot) return null;
+
+    const fileId = `ai_${Date.now().toString(36)}_${index}` as FileId;
     const now = Date.now();
-    const files: BinaryFileData[] = results.map((result, index) => ({
-      id: `ai_${now.toString(36)}_${index}` as FileId,
+    const file: BinaryFileData = {
+      id: fileId,
       mimeType: result.mimeType as BinaryFileData["mimeType"],
       dataURL: result.dataUrl as BinaryFileData["dataURL"],
       created: now,
       lastRetrieved: now,
-    }));
+    };
+    api.addFiles([file]);
 
-    api.addFiles(files);
+    const [imageElement] = convertToExcalidrawElements(
+      [
+        {
+          type: "image",
+          x: slot.x,
+          y: slot.y,
+          width: slot.w,
+          height: slot.h,
+          fileId,
+          status: "saved",
+        },
+      ],
+      { regenerateIds: true },
+    );
 
-    const skeletons = files.map((file, index) => ({
-      type: "image" as const,
-      x: startX + index * (MANUSCRIPT_WIDTH + GAP),
-      y: startY,
-      width: MANUSCRIPT_WIDTH,
-      height: MANUSCRIPT_HEIGHT,
-      fileId: file.id,
-      status: "saved" as const,
-    }));
+    const nextElements = [...api.getSceneElementsIncludingDeleted(), imageElement];
+    api.updateScene({ elements: nextElements, captureUpdate: "IMMEDIATELY" });
 
-    const newImageElements = convertToExcalidrawElements(skeletons, { regenerateIds: true });
-    const nextElements = [...api.getSceneElementsIncludingDeleted(), ...newImageElements];
-    const nextFiles = files.reduce<BinaryFiles>(
-      (acc, file) => {
-        acc[file.id] = file;
-        return acc;
-      },
-      { ...snapshotRef.current.files },
+    // 让 Excalidraw 真正把 file 挂到 element 上，避免破图占位
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    // 第一张：把视图定位到该图中心并设为 158% 缩放（实测最佳阅读比例），登记到右下角浮层
+    if (index === 0) {
+      const TARGET_ZOOM = 1.58;
+      const st = api.getAppState();
+      // Excalidraw 的 scroll 是"画布到视口左上角的偏移"，按 zoom 后再换算
+      const cx = slot.x + slot.w / 2;
+      const cy = slot.y + slot.h / 2;
+      api.updateScene({
+        appState: {
+          zoom: { value: TARGET_ZOOM as AppState["zoom"]["value"] },
+          scrollX: st.width / (2 * TARGET_ZOOM) - cx,
+          scrollY: st.height / (2 * TARGET_ZOOM) - cy,
+        },
+        captureUpdate: "IMMEDIATELY",
+      });
+      setManuscriptElementIds([imageElement.id]);
+      setActiveManuscriptIndex(0);
+    } else {
+      setManuscriptElementIds((prev) => {
+        const next = [...prev];
+        next[index] = imageElement.id;
+        return next;
+      });
+    }
+
+    // 最后一张：保存历史快照
+    if (index === total - 1) {
+      saveSnapshotToHistory(
+        {
+          elements: api.getSceneElementsIncludingDeleted(),
+          appState: sanitizeAppState(api.getAppState()),
+          files: snapshotRef.current.files,
+        },
+        "生成四张手稿图",
+      );
+      // 用完释放，下次一组新的从头算
+      manuscriptSlotsRef.current = null;
+    }
+    persistDirty(true);
+
+    return {
+      elementId: imageElement.id,
+      fileId,
+      x: slot.x,
+      y: slot.y,
+      width: slot.w,
+      height: slot.h,
+    };
+  }, [persistDirty, saveSnapshotToHistory]);
+
+  // 用一张新生成的图替换画布上已有的 image element（保留位置/尺寸/id），用于"单张重生"。
+  // 做法：注册新 file → 把目标 element 的 fileId 指向新 file → updateScene。
+  const replaceAiImage = useCallback(async (elementId: string, result: AiImageResult): Promise<boolean> => {
+    const api = excalidrawAPIRef.current;
+    if (!api) return false;
+
+    const existing = api
+      .getSceneElementsIncludingDeleted()
+      .find((el) => el.id === elementId && !el.isDeleted);
+
+    if (!existing || existing.type !== "image") {
+      return false;
+    }
+
+    const newFileId = `ai_${Date.now().toString(36)}_r` as FileId;
+    const now = Date.now();
+    const file: BinaryFileData = {
+      id: newFileId,
+      mimeType: result.mimeType as BinaryFileData["mimeType"],
+      dataURL: result.dataUrl as BinaryFileData["dataURL"],
+      created: now,
+      lastRetrieved: now,
+    };
+
+    api.addFiles([file]);
+
+    const nextElements = api.getSceneElementsIncludingDeleted().map((el) =>
+      el.id === elementId && el.type === "image"
+        ? { ...el, fileId: newFileId, version: el.version + 1, versionNonce: Math.floor(Math.random() * 0x7fffffff) }
+        : el,
     );
 
     api.updateScene({
       elements: nextElements,
       captureUpdate: "IMMEDIATELY",
     });
-    api.scrollToContent(newImageElements, { fitToContent: true });
+
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
     saveSnapshotToHistory(
       {
-        elements: nextElements,
+        elements: api.getSceneElementsIncludingDeleted(),
         appState: sanitizeAppState(api.getAppState()),
-        files: nextFiles,
+        files: snapshotRef.current.files,
       },
-      "生成四张手稿图",
+      "重生手稿图",
     );
     persistDirty(true);
-
-    return newImageElements.map((element, index) => ({
-      elementId: element.id,
-      fileId: files[index].id,
-      x: skeletons[index].x,
-      y: skeletons[index].y,
-      width: MANUSCRIPT_WIDTH,
-      height: MANUSCRIPT_HEIGHT,
-    }));
+    return true;
   }, [persistDirty, saveSnapshotToHistory]);
 
   // 把指定 id 的元素居中显示在画布中央（视角移动，不动元素）。
@@ -1250,6 +1477,37 @@ export default function App() {
 
     api.scrollToContent([target], { fitToContent: true });
   }, []);
+
+  // 手稿图专用聚焦：保持 158% 缩放比例（实测最佳阅读尺寸），把目标图居中。
+  const focusManuscriptImage = useCallback((elementId: string) => {
+    const api = excalidrawAPIRef.current;
+    if (!api) return;
+    const target = api
+      .getSceneElementsIncludingDeleted()
+      .find((el) => el.id === elementId && !el.isDeleted);
+    if (!target) return;
+
+    const TARGET_ZOOM = 1.58;
+    const st = api.getAppState();
+    const cx = target.x + target.width / 2;
+    const cy = target.y + target.height / 2;
+    api.updateScene({
+      appState: {
+        zoom: { value: TARGET_ZOOM as AppState["zoom"]["value"] },
+        scrollX: st.width / (2 * TARGET_ZOOM) - cx,
+        scrollY: st.height / (2 * TARGET_ZOOM) - cy,
+      },
+      captureUpdate: "IMMEDIATELY",
+    });
+  }, []);
+
+  // 白板右下角浮层：1/2/3/4 跳转到对应手稿图（保持 158% 缩放）
+  const jumpToManuscript = useCallback((index: number) => {
+    const id = manuscriptElementIds[index];
+    if (!id) return;
+    setActiveManuscriptIndex(index);
+    focusManuscriptImage(id);
+  }, [manuscriptElementIds, focusManuscriptImage]);
 
   useEffect(() => {
     return window.excalidaw?.onMenuCommand(({ command }) => {
@@ -1307,6 +1565,8 @@ export default function App() {
             onGenerateLogic={generateLogicManuscript}
             onInsertImage={insertAiImage}
             onInsertImages={insertAiImages}
+            onInsertManuscriptAt={insertManuscriptAt}
+            onReplaceImage={replaceAiImage}
             onFocusImage={focusAiImage}
           />
         ) : null}
@@ -1353,6 +1613,21 @@ export default function App() {
               <WelcomeScreen.Hints.HelpHint />
             </WelcomeScreen>
           </Excalidraw>
+          {manuscriptElementIds.length > 0 ? (
+            <div className="manuscript-jump-fab" role="group" aria-label="四张手稿图跳转">
+              {manuscriptElementIds.map((id, index) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={activeManuscriptIndex === index ? "active" : ""}
+                  onClick={() => jumpToManuscript(index)}
+                  aria-label={`跳转到第 ${index + 1} 张手稿图`}
+                >
+                  {index + 1}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </section>
       </div>
 
